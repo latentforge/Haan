@@ -216,3 +216,17 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# PyTorch
+data/
+.data/
+results/
+results-*/
+wandb/
+logs/
+trainer_output/
+
+# AI Agents
+.omc
+.claude
+.agents
