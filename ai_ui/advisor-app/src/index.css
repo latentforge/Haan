@@ -1,0 +1,8 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+ * 디자인 원천은 ./styles/advisor.css (원본 aiui.html에서 이식).
+ * Tailwind base가 폰트/여백을 덮어쓰지 않도록 advisor.css를 뒤에 로드합니다(main.jsx 참조).
+ */
