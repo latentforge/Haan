@@ -1,0 +1,554 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Haan · 상담 콘솔</title>
+<style>
+:root{
+  --page:#F6F7FB;
+  --surface:#FFFFFF;
+  --surface-2:#FBFCFE;
+  --ink:#252A34;
+  --ink-soft:#4F5663;
+  --ink-dim:#9096A3;
+  --line:#E5E9F0;
+  --line-2:#EEF1F6;
+  --field:#F5F7FB;
+
+  --violet:#7C6CF0;
+  --violet-so:rgba(124,108,240,.12);
+  --cyan:#3BB6D6;
+  --pink:#E86BB8;
+  --amber:#E8A33D;
+  --ok:#27B879;
+  --danger:#F02D45;
+
+  --r-lg:20px;
+  --r-md:14px;
+  --r-pill:999px;
+  --ease:cubic-bezier(.2,0,0,1);
+  --shadow-card:0 1px 2px rgba(37,42,52,.04), 0 12px 30px -18px rgba(37,42,52,.22);
+  --shadow-soft:0 8px 24px -16px rgba(37,42,52,.3);
+}
+*{ box-sizing:border-box; }
+html,body{ margin:0; height:100%; }
+body{
+  font-family:"SUIT","SUIT Variable","Pretendard",-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;
+  color:var(--ink);
+  background:
+    radial-gradient(120% 80% at 12% -8%, rgba(124,108,240,.07) 0%, transparent 46%),
+    radial-gradient(120% 80% at 96% 4%, rgba(59,182,214,.07) 0%, transparent 44%),
+    var(--page);
+  min-height:100dvh;
+  -webkit-font-smoothing:antialiased;
+  display:flex; flex-direction:column;
+}
+
+/* ============ TOP BAR ============ */
+.topbar{
+  display:flex; align-items:center; gap:16px;
+  padding:14px 22px;
+  background:rgba(255,255,255,.72);
+  -webkit-backdrop-filter:blur(14px) saturate(1.1);
+  backdrop-filter:blur(14px) saturate(1.1);
+  border-bottom:1px solid var(--line-2);
+  position:sticky; top:0; z-index:10;
+}
+.brand{ display:flex; align-items:center; gap:11px; }
+.brand .mark{
+  width:34px; height:34px; border-radius:11px; flex:none;
+  background:conic-gradient(from 210deg, #C3E8FD, #E5E2FD, #F9CCFD, #BDFBFD, #C3E8FD);
+  box-shadow:inset 0 0 0 1px rgba(255,255,255,.7), 0 6px 14px -8px rgba(124,108,240,.6);
+  position:relative;
+}
+.brand .mark::after{
+  content:""; position:absolute; inset:24%; border-radius:50%;
+  background:radial-gradient(circle at 38% 34%, #fff, rgba(255,255,255,.2) 60%, transparent);
+  opacity:.85;
+}
+.brand h1{ font-size:16px; font-weight:800; margin:0; letter-spacing:-.01em; }
+.brand p{ font-size:11.5px; color:var(--ink-dim); margin:1px 0 0; font-weight:600; }
+
+.callmeta{ display:flex; align-items:center; gap:10px; margin-left:8px; }
+.pill{
+  display:inline-flex; align-items:center; gap:7px;
+  padding:6px 13px; border-radius:var(--r-pill);
+  font-size:12.5px; font-weight:700; letter-spacing:.01em;
+  background:var(--field); color:var(--ink-soft); border:1px solid var(--line);
+}
+.pill .dot{ width:7px; height:7px; border-radius:50%; background:var(--ink-dim); }
+.pill[data-state="active"]{ background:rgba(39,184,121,.1); color:#137a4e; border-color:rgba(39,184,121,.28); }
+.pill[data-state="active"] .dot{ background:var(--ok); animation:beacon 1.8s var(--ease) infinite; }
+.pill[data-state="ended"]{ background:rgba(240,45,69,.08); color:#b21f31; border-color:rgba(240,45,69,.24); }
+@keyframes beacon{ 0%{ box-shadow:0 0 0 0 rgba(39,184,121,.5);} 70%,100%{ box-shadow:0 0 0 7px rgba(39,184,121,0);} }
+.timer{ font-variant-numeric:tabular-nums; font-size:13px; font-weight:700; color:var(--ink-soft); letter-spacing:.04em; }
+
+.spacer{ flex:1; }
+.actions{ display:flex; align-items:center; gap:9px; }
+.btn{
+  border:1px solid var(--line); background:var(--surface); color:var(--ink);
+  font-family:inherit; font-weight:700; font-size:13px; cursor:pointer;
+  padding:9px 15px; border-radius:var(--r-pill);
+  transition:transform .1s var(--ease), background .15s var(--ease), border-color .15s var(--ease), box-shadow .15s var(--ease);
+  box-shadow:var(--shadow-soft);
+}
+.btn:hover{ background:var(--field); }
+.btn:active{ transform:scale(.96); }
+.btn.primary{
+  color:#fff; border-color:transparent;
+  background:linear-gradient(135deg, var(--violet), #6A7BF0);
+  box-shadow:0 10px 22px -12px var(--violet);
+}
+.btn.primary:hover{ filter:brightness(1.05); background:linear-gradient(135deg, var(--violet), #6A7BF0); }
+.btn.ghost{ background:transparent; box-shadow:none; }
+.btn:disabled{ opacity:.45; cursor:not-allowed; }
+
+/* ============ LAYOUT ============ */
+main{
+  flex:1; min-height:0;
+  display:grid;
+  grid-template-columns:minmax(340px, 1fr) minmax(420px, 1.15fr);
+  gap:18px; padding:18px 22px 22px;
+}
+@media (max-width:900px){
+  main{ grid-template-columns:1fr; }
+}
+.panel{
+  background:var(--surface);
+  border:1px solid var(--line-2);
+  border-radius:var(--r-lg);
+  box-shadow:var(--shadow-card);
+  display:flex; flex-direction:column; min-height:0; overflow:hidden;
+}
+.panel > header{
+  display:flex; align-items:center; gap:10px;
+  padding:15px 18px 13px; border-bottom:1px solid var(--line-2);
+}
+.panel > header .ph-ic{
+  width:28px; height:28px; border-radius:9px; display:grid; place-items:center; flex:none;
+  color:#fff;
+}
+.panel.transcript > header .ph-ic{ background:linear-gradient(135deg,#3BB6D6,#5AA0E8); }
+.panel.flow > header .ph-ic{ background:linear-gradient(135deg,#7C6CF0,#B06BE8); }
+.panel > header h2{ font-size:14.5px; font-weight:800; margin:0; letter-spacing:-.01em; }
+.panel > header p{ font-size:11.5px; color:var(--ink-dim); margin:1px 0 0; font-weight:600; }
+.panel .body{ flex:1; min-height:0; overflow-y:auto; padding:16px 18px; }
+.panel .body::-webkit-scrollbar{ width:8px; }
+.panel .body::-webkit-scrollbar-thumb{ background:var(--line); border-radius:8px; }
+
+/* ---- empty state ---- */
+.empty{
+  height:100%; display:grid; place-items:center; text-align:center;
+  color:var(--ink-dim); font-size:13px; font-weight:600; gap:10px; padding:24px;
+}
+.empty svg{ opacity:.5; }
+
+/* ============ TRANSCRIPT ============ */
+.turn{ display:flex; gap:10px; margin-bottom:14px; align-items:flex-start; animation:rise .32s var(--ease) both; }
+.turn .who{
+  width:30px; height:30px; border-radius:9px; flex:none; display:grid; place-items:center;
+  font-size:11px; font-weight:800; color:#fff;
+}
+.turn.customer .who{ background:linear-gradient(135deg,#8A93A5,#6E7688); }
+.turn.ai .who{ background:linear-gradient(135deg,#7C6CF0,#B06BE8); }
+.turn .bubble{
+  padding:10px 13px; border-radius:13px; font-size:13.5px; line-height:1.5; font-weight:500;
+  max-width:calc(100% - 44px);
+}
+.turn.customer .bubble{ background:var(--field); color:var(--ink); border-top-left-radius:4px; }
+.turn.ai .bubble{ background:var(--violet-so); color:#3a3170; border-top-left-radius:4px; }
+.turn .who small{ font-size:0; }
+.turn .meta{ font-size:10.5px; color:var(--ink-dim); font-weight:700; margin-bottom:3px; letter-spacing:.02em; }
+.turn .col{ min-width:0; }
+@keyframes rise{ from{ opacity:0; transform:translateY(6px);} to{ opacity:1; transform:none;} }
+
+/* typing indicator */
+.typing{ display:inline-flex; gap:4px; padding:4px 2px; }
+.typing i{ width:6px; height:6px; border-radius:50%; background:var(--ink-dim); opacity:.4; animation:dotp 1.2s var(--ease) infinite; }
+.typing i:nth-child(2){ animation-delay:.16s; } .typing i:nth-child(3){ animation-delay:.32s; }
+@keyframes dotp{ 0%,80%,100%{ opacity:.3; transform:translateY(0);} 40%{ opacity:1; transform:translateY(-3px);} }
+
+/* ============ AI FLOW TIMELINE ============ */
+.flow .body{ padding:14px 18px; }
+.node{
+  position:relative; padding:0 0 4px 30px; margin-bottom:14px;
+  animation:rise .32s var(--ease) both;
+}
+.node::before{ /* rail */
+  content:""; position:absolute; left:10px; top:20px; bottom:-14px; width:2px; background:var(--line);
+}
+.node:last-child::before{ display:none; }
+.node .bullet{
+  position:absolute; left:3px; top:3px; width:16px; height:16px; border-radius:50%;
+  background:#fff; border:2px solid var(--line); display:grid; place-items:center;
+}
+.node[data-phase="detect"] .bullet{ border-color:var(--cyan); }
+.node[data-phase="clue"] .bullet{ border-color:var(--amber); }
+.node[data-phase="verify"] .bullet{ border-color:var(--violet); }
+.node[data-phase="tool"] .bullet{ border-color:var(--pink); }
+.node[data-phase="answer"] .bullet{ border-color:var(--ok); }
+.node.active .bullet{ animation:pulse 1.1s var(--ease) infinite; }
+.node.done .bullet{ background:var(--ok); border-color:var(--ok); }
+.node.done .bullet::after{ content:""; width:5px; height:8px; border:2px solid #fff; border-top:0; border-left:0; transform:rotate(45deg) translateY(-1px); }
+@keyframes pulse{ 0%{ box-shadow:0 0 0 0 var(--violet-so);} 70%,100%{ box-shadow:0 0 0 7px rgba(124,108,240,0);} }
+.node .label{ font-size:13.5px; font-weight:800; letter-spacing:-.01em; display:flex; align-items:center; gap:8px; }
+.node .tag{ font-size:10px; font-weight:800; padding:2px 7px; border-radius:var(--r-pill); letter-spacing:.02em; }
+.node[data-phase="detect"] .tag{ background:rgba(59,182,214,.14); color:#1f7f99; }
+.node[data-phase="clue"] .tag{ background:rgba(232,163,61,.16); color:#a9700d; }
+.node[data-phase="verify"] .tag{ background:var(--violet-so); color:#5b4bd0; }
+.node[data-phase="tool"] .tag{ background:rgba(232,107,184,.14); color:#b13a86; }
+.node[data-phase="answer"] .tag{ background:rgba(39,184,121,.14); color:#137a4e; }
+.node .detail{ font-size:12px; color:var(--ink-soft); margin-top:3px; line-height:1.45; font-weight:500; }
+
+/* tool card */
+.toolcard{
+  margin:8px 0 4px; border:1px solid var(--line); border-radius:var(--r-md); overflow:hidden;
+  background:var(--surface-2);
+}
+.toolcard .tc-head{ display:flex; align-items:center; gap:9px; padding:10px 12px; }
+.toolcard .tc-ic{ width:24px; height:24px; border-radius:7px; flex:none; display:grid; place-items:center; color:#fff; background:linear-gradient(135deg,#E86BB8,#C05CE0); }
+.toolcard .tc-name{ font-size:12.5px; font-weight:800; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
+.toolcard .tc-status{ margin-left:auto; font-size:10.5px; font-weight:800; padding:3px 9px; border-radius:var(--r-pill); }
+.tc-status.running{ background:rgba(232,163,61,.16); color:#a9700d; }
+.tc-status.done{ background:rgba(39,184,121,.14); color:#137a4e; }
+.tc-status.error{ background:rgba(240,45,69,.12); color:#b21f31; }
+.toolcard .tc-body{ border-top:1px dashed var(--line); padding:9px 12px; display:grid; gap:6px; }
+.kv{ font-size:11px; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; color:var(--ink-soft); line-height:1.5; white-space:pre-wrap; word-break:break-all; }
+.kv b{ color:var(--ink-dim); font-weight:700; }
+.spin{ width:13px; height:13px; border-radius:50%; border:2px solid rgba(0,0,0,.12); border-top-color:var(--amber); animation:spin .8s linear infinite; }
+@keyframes spin{ to{ transform:rotate(360deg);} }
+
+/* ============ CUSTOMER INFO (locked → unlocked) ============ */
+.custcard{
+  margin:2px 18px 16px; border:1px solid var(--line-2); border-radius:var(--r-md);
+  background:linear-gradient(180deg,#fff,#FBFCFE); overflow:hidden; position:relative;
+}
+.custcard .cc-head{ display:flex; align-items:center; gap:9px; padding:12px 14px; border-bottom:1px solid var(--line-2); }
+.custcard .cc-head .ic{ width:26px; height:26px; border-radius:8px; display:grid; place-items:center; color:#fff; background:linear-gradient(135deg,#252A34,#4F5663); }
+.custcard .cc-head h3{ font-size:13px; font-weight:800; margin:0; }
+.custcard .cc-head .state{ margin-left:auto; font-size:10.5px; font-weight:800; padding:3px 9px; border-radius:var(--r-pill); background:var(--field); color:var(--ink-dim); }
+.custcard.unlocked .cc-head .state{ background:rgba(39,184,121,.14); color:#137a4e; }
+.cc-body{ padding:13px 14px; position:relative; }
+.cc-rows{ display:grid; grid-template-columns:auto 1fr; gap:7px 14px; font-size:12.5px; }
+.cc-rows .k{ color:var(--ink-dim); font-weight:700; }
+.cc-rows .v{ color:var(--ink); font-weight:600; }
+.cc-cards{ margin-top:12px; display:grid; gap:8px; }
+.mini-card{ display:flex; align-items:center; gap:10px; padding:9px 11px; border:1px solid var(--line); border-radius:11px; background:#fff; }
+.mini-card .mc-chip{ width:30px; height:22px; border-radius:5px; background:linear-gradient(135deg,#C3E8FD,#E5E2FD); flex:none; box-shadow:inset 0 0 0 1px rgba(255,255,255,.6); }
+.mini-card .mc-name{ font-size:12.5px; font-weight:700; }
+.mini-card .mc-sub{ font-size:11px; color:var(--ink-dim); font-weight:600; }
+.mini-card .mc-status{ margin-left:auto; font-size:10.5px; font-weight:800; padding:3px 8px; border-radius:var(--r-pill); background:rgba(39,184,121,.14); color:#137a4e; }
+.mini-card .mc-status[data-s="suspended"]{ background:rgba(232,163,61,.16); color:#a9700d; }
+.mini-card .mc-status[data-s="lost"]{ background:rgba(240,45,69,.12); color:#b21f31; }
+
+/* locked overlay */
+.cc-lock{
+  position:absolute; inset:0; display:grid; place-items:center; gap:10px;
+  background:rgba(251,252,254,.72); -webkit-backdrop-filter:blur(7px); backdrop-filter:blur(7px);
+  color:var(--ink-soft); font-size:12.5px; font-weight:700; text-align:center; padding:16px;
+  transition:opacity .5s var(--ease), visibility .5s var(--ease);
+}
+.custcard.unlocked .cc-lock{ opacity:0; visibility:hidden; }
+.cc-lock .lockic{ width:38px; height:38px; border-radius:11px; display:grid; place-items:center; background:var(--field); color:var(--ink-dim); }
+.custcard:not(.unlocked) .cc-body .cc-rows,
+.custcard:not(.unlocked) .cc-body .cc-cards{ filter:blur(5px); opacity:.5; pointer-events:none; user-select:none; }
+
+/* unlock flash */
+@keyframes unlockflash{ 0%{ box-shadow:0 0 0 0 rgba(39,184,121,.45);} 100%{ box-shadow:0 0 0 14px rgba(39,184,121,0);} }
+.custcard.justunlocked{ animation:unlockflash .9s var(--ease); }
+
+/* manual input row */
+.injectbar{ display:flex; gap:8px; padding:12px 18px; border-top:1px solid var(--line-2); background:var(--surface-2); }
+.injectbar input{
+  flex:1; border:1px solid var(--line); border-radius:var(--r-pill); padding:9px 14px;
+  font-family:inherit; font-size:13px; color:var(--ink); background:#fff; outline:none;
+}
+.injectbar input:focus{ border-color:var(--violet); box-shadow:0 0 0 3px var(--violet-so); }
+
+.footnote{ text-align:center; font-size:11px; color:var(--ink-dim); padding:0 0 14px; font-weight:600; }
+.footnote b{ color:var(--amber); }
+</style>
+</head>
+<body>
+  <!-- TOP BAR -->
+  <div class="topbar">
+    <div class="brand">
+      <div class="mark"></div>
+      <div>
+        <h1>Haan 상담 콘솔</h1>
+        <p>Hearing Always, Acting Naturally</p>
+      </div>
+    </div>
+    <div class="callmeta">
+      <span class="pill" id="callPill" data-state="idle"><span class="dot"></span><span id="callState">대기 중</span></span>
+      <span class="timer" id="timer">00:00</span>
+    </div>
+    <div class="spacer"></div>
+    <div class="actions">
+      <button class="btn primary" id="startBtn">데모 통화 시작</button>
+      <button class="btn ghost" id="endBtn" disabled>통화 종료</button>
+    </div>
+  </div>
+
+  <!-- MAIN -->
+  <main>
+    <!-- LEFT: transcript -->
+    <section class="panel transcript">
+      <header>
+        <span class="ph-ic">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M4 5h16v11H8l-4 3V5Z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>
+        </span>
+        <div>
+          <h2>실시간 전사</h2>
+          <p>고객 통화 음성 → 텍스트 (STT 어댑터 입력)</p>
+        </div>
+      </header>
+      <div class="body" id="transcript">
+        <div class="empty" id="transcriptEmpty">
+          <svg width="40" height="40" viewBox="0 0 24 24" fill="none"><path d="M12 15a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3Z" stroke="currentColor" stroke-width="1.6"/><path d="M6 11a6 6 0 0 0 12 0M12 18v3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+          <span>통화가 시작되면 고객 발화가<br/>여기에 실시간으로 전사됩니다.</span>
+        </div>
+      </div>
+      <div class="injectbar">
+        <input id="injectInput" type="text" placeholder="수동 전사 입력 (실제 STT 대체 테스트)… 예: 신한카드 정지해줘" />
+        <button class="btn" id="injectBtn">전송</button>
+      </div>
+    </section>
+
+    <!-- RIGHT: AI flow -->
+    <section class="panel flow">
+      <header>
+        <span class="ph-ic">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M12 3v3m0 12v3m9-9h-3M6 12H3m13.5-6.5-2 2m-7 7-2 2m11 0-2-2m-7-7-2-2" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="2"/></svg>
+        </span>
+        <div>
+          <h2>AI 판단 및 실행 흐름</h2>
+          <p>감지 → 단서 → 본인확인 → 도구 실행</p>
+        </div>
+      </header>
+
+      <!-- customer info card (locked until verify) -->
+      <div class="custcard" id="custCard">
+        <div class="cc-head">
+          <span class="ic">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="8" r="4" stroke="currentColor" stroke-width="2"/><path d="M4 20c0-4 4-6 8-6s8 2 8 6" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+          </span>
+          <h3>고객 개인정보</h3>
+          <span class="state" id="custState">잠김</span>
+        </div>
+        <div class="cc-body">
+          <div class="cc-rows" id="custRows">
+            <span class="k">이름</span><span class="v">••••</span>
+            <span class="k">등급</span><span class="v">••••</span>
+            <span class="k">연락처</span><span class="v">••••</span>
+            <span class="k">주소</span><span class="v">••••••••</span>
+          </div>
+          <div class="cc-cards" id="custCards"></div>
+          <div class="cc-lock" id="custLock">
+            <span class="lockic">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><rect x="4" y="10" width="16" height="11" rx="2" stroke="currentColor" stroke-width="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+            </span>
+            <span>본인확인 완료 시 개인정보가 열립니다.<br/>(데모: verify_identity 성공 = 잠금 해제)</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="body" id="flow">
+        <div class="empty" id="flowEmpty">
+          <svg width="40" height="40" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="1.6"/><path d="M12 7v5l3 3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+          <span>AI가 발화를 분석하면 판단 노드가<br/>하나씩 스트리밍됩니다.</span>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <div class="footnote">⚠️ <b>데모용 목업</b> — 음성엔진·자체 LLM·카드사 시스템은 어댑터 뒤의 Mock 으로 대체되어 있습니다.</div>
+
+<script>
+(function(){
+  "use strict";
+  var $ = function(id){ return document.getElementById(id); };
+  var proto = location.protocol === "https:" ? "wss" : "ws";
+  var ws=null, retry=0;
+
+  var transcript=$("transcript"), transcriptEmpty=$("transcriptEmpty");
+  var flow=$("flow"), flowEmpty=$("flowEmpty");
+  var custCard=$("custCard"), custRows=$("custRows"), custCards=$("custCards"), custState=$("custState");
+  var callPill=$("callPill"), callState=$("callState"), timerEl=$("timer");
+  var startBtn=$("startBtn"), endBtn=$("endBtn");
+
+  var nodes={};      // id -> node element (ai_step)
+  var tools={};      // id -> tool card element
+  var timerInt=null, callStart=0;
+
+  var PHASE_TAG={ detect:"감지", clue:"단서", verify:"본인확인", tool:"도구", answer:"응답" };
+  var TOOL_KO={ verify_identity:"본인확인", suspend_card:"카드 정지", report_lost:"분실 신고" };
+  var CARD_STATUS_KO={ active:"정상", suspended:"정지됨", lost:"분실신고" };
+
+  function pad(n){ return String(n).padStart(2,"0"); }
+  function fmt(ms){ var s=Math.floor(ms/1000); return pad(Math.floor(s/60))+":"+pad(s%60); }
+  function startTimer(){ callStart=Date.now(); if(timerInt) clearInterval(timerInt);
+    timerEl.textContent="00:00";
+    timerInt=setInterval(function(){ timerEl.textContent=fmt(Date.now()-callStart); },1000); }
+  function stopTimer(){ if(timerInt){ clearInterval(timerInt); timerInt=null; } }
+
+  function setCall(state){
+    if(state==="active"){ callPill.dataset.state="active"; callState.textContent="통화 중"; startBtn.disabled=true; endBtn.disabled=false; }
+    else if(state==="ended"){ callPill.dataset.state="ended"; callState.textContent="통화 종료"; startBtn.disabled=false; endBtn.disabled=true; stopTimer(); }
+    else { callPill.dataset.state="idle"; callState.textContent="대기 중"; startBtn.disabled=false; endBtn.disabled=true; }
+  }
+
+  function resetPanels(){
+    transcript.innerHTML=""; transcript.appendChild(transcriptEmpty); transcriptEmpty.style.display="";
+    flow.innerHTML=""; flow.appendChild(flowEmpty); flowEmpty.style.display="";
+    nodes={}; tools={};
+    custCard.classList.remove("unlocked","justunlocked");
+    custState.textContent="잠김"; custCards.innerHTML="";
+    setRowsMasked();
+  }
+  function setRowsMasked(){
+    custRows.innerHTML =
+      '<span class="k">이름</span><span class="v">••••</span>'+
+      '<span class="k">등급</span><span class="v">••••</span>'+
+      '<span class="k">연락처</span><span class="v">••••</span>'+
+      '<span class="k">주소</span><span class="v">••••••••</span>';
+  }
+
+  /* ---------- transcript ---------- */
+  function addTurn(evt){
+    transcriptEmpty.style.display="none";
+    var who = evt.speaker==="ai" ? "ai":"customer";
+    var wrap=document.createElement("div"); wrap.className="turn "+who;
+    var name = who==="ai" ? "AI":"고객";
+    var initial = who==="ai" ? "AI":"고";
+    wrap.innerHTML =
+      '<div class="who">'+initial+'</div>'+
+      '<div class="col"><div class="meta">'+name+'</div>'+
+      '<div class="bubble"></div></div>';
+    wrap.querySelector(".bubble").textContent=evt.text;
+    transcript.appendChild(wrap);
+    transcript.scrollTop=transcript.scrollHeight;
+  }
+
+  /* ---------- ai_step nodes ---------- */
+  function upsertNode(evt){
+    flowEmpty.style.display="none";
+    var el=nodes[evt.id];
+    if(!el){
+      el=document.createElement("div"); el.className="node"; el.dataset.phase=evt.phase;
+      el.innerHTML='<span class="bullet"></span>'+
+        '<div class="label"><span class="lbl"></span><span class="tag">'+(PHASE_TAG[evt.phase]||evt.phase)+'</span></div>'+
+        '<div class="detail"></div>';
+      flow.appendChild(el); nodes[evt.id]=el;
+    }
+    el.querySelector(".lbl").textContent=evt.label;
+    el.querySelector(".detail").textContent=evt.detail||"";
+    el.classList.remove("active","done");
+    el.classList.add(evt.status==="done"?"done":"active");
+    flow.scrollTop=flow.scrollHeight;
+  }
+
+  /* ---------- tool cards ---------- */
+  function upsertTool(evt){
+    flowEmpty.style.display="none";
+    var el=tools[evt.id];
+    if(!el){
+      el=document.createElement("div"); el.className="node"; el.dataset.phase="tool";
+      var card=document.createElement("div"); card.className="toolcard";
+      card.innerHTML=
+        '<div class="tc-head"><span class="tc-ic">'+
+          '<svg width="13" height="13" viewBox="0 0 24 24" fill="none"><path d="M14 7a4 4 0 0 1-5 5l-5 5 2 2 5-5a4 4 0 0 0 5-5l-2 2-2-2 2-2Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>'+
+        '</span><span class="tc-name">'+evt.tool+'</span>'+
+        '<span class="tc-status"></span></div>'+
+        '<div class="tc-body"></div>';
+      el.appendChild(card);
+      flow.appendChild(el); tools[evt.id]=el;
+    }
+    var st=el.querySelector(".tc-status");
+    var body=el.querySelector(".tc-body");
+    st.className="tc-status "+evt.status;
+    if(evt.status==="running"){ st.innerHTML='<span class="spin" style="display:inline-block;vertical-align:-2px;margin-right:5px"></span>실행중'; }
+    else if(evt.status==="done"){ st.textContent="완료"; }
+    else if(evt.status==="error"){ st.textContent="실패"; }
+
+    var rows="";
+    if(evt.request){ rows+='<div class="kv"><b>요청</b> '+esc(JSON.stringify(evt.request))+'</div>'; }
+    if(evt.response){ rows+='<div class="kv"><b>응답</b> '+esc(JSON.stringify(evt.response))+'</div>'; }
+    body.innerHTML=rows;
+    flow.scrollTop=flow.scrollHeight;
+  }
+
+  function esc(s){ return String(s).replace(/[&<>]/g,function(c){ return {"&":"&amp;","<":"&lt;",">":"&gt;"}[c]; }); }
+
+  /* ---------- identity unlock ---------- */
+  function unlock(profile){
+    if(!profile) return;
+    custRows.innerHTML=
+      '<span class="k">이름</span><span class="v">'+esc(profile.name)+'</span>'+
+      '<span class="k">등급</span><span class="v">'+esc(profile.grade)+'</span>'+
+      '<span class="k">연락처</span><span class="v">'+esc(profile.phone)+'</span>'+
+      '<span class="k">주소</span><span class="v">'+esc(profile.address)+'</span>';
+    renderCards(profile.cards);
+    custState.textContent="열림";
+    var wasLocked=!custCard.classList.contains("unlocked");
+    custCard.classList.add("unlocked");
+    if(wasLocked){ custCard.classList.add("justunlocked");
+      setTimeout(function(){ custCard.classList.remove("justunlocked"); }, 900); }
+  }
+  function renderCards(cards){
+    if(!cards) return;
+    custCards.innerHTML="";
+    cards.forEach(function(c){
+      var d=document.createElement("div"); d.className="mini-card";
+      d.innerHTML='<span class="mc-chip"></span>'+
+        '<div><div class="mc-name">'+esc(c.product)+'</div>'+
+        '<div class="mc-sub">'+esc(c.type)+' · ••'+esc(c.last4)+'</div></div>'+
+        '<span class="mc-status" data-s="'+c.status+'">'+(CARD_STATUS_KO[c.status]||c.status)+'</span>';
+      custCards.appendChild(d);
+    });
+  }
+
+  /* ---------- event dispatch ---------- */
+  function handle(evt){
+    switch(evt.type){
+      case "call_state":
+        if(evt.state==="active"){ resetPanels(); setCall("active"); startTimer(); }
+        else if(evt.state==="ended"){ setCall("ended"); }
+        else if(evt.state==="idle"){ resetPanels(); setCall("idle"); }
+        break;
+      case "transcript": addTurn(evt); break;
+      case "ai_step": upsertNode(evt); break;
+      case "tool_call": upsertTool(evt); break;
+      case "identity": if(evt.unlocked) unlock(evt.profile); break;
+      case "snapshot":
+        resetPanels();
+        if(evt.active){ setCall("active"); }
+        (evt.history||[]).forEach(handle);
+        if(evt.unlocked && evt.profile) unlock(evt.profile);
+        break;
+    }
+  }
+
+  /* ---------- ws ---------- */
+  function connect(){
+    ws=new WebSocket(proto+"://"+location.host);
+    ws.onopen=function(){ retry=0; ws.send(JSON.stringify({type:"hello", role:"agent"})); };
+    ws.onmessage=function(e){ var evt; try{ evt=JSON.parse(e.data); }catch(_){ return; } handle(evt); };
+    ws.onclose=function(){ retry++; setCall("idle"); setTimeout(connect, Math.min(5000,500*retry)); };
+    ws.onerror=function(){ try{ ws.close(); }catch(_){} };
+  }
+  function sendWs(obj){ if(ws&&ws.readyState===1) ws.send(JSON.stringify(obj)); }
+
+  startBtn.addEventListener("click", function(){ sendWs({type:"call_start"}); });
+  endBtn.addEventListener("click", function(){ sendWs({type:"call_end"}); });
+  var injectInput=$("injectInput"), injectBtn=$("injectBtn");
+  function inject(){ var t=injectInput.value.trim(); if(!t) return; sendWs({type:"transcript_in", text:t}); injectInput.value=""; }
+  injectBtn.addEventListener("click", inject);
+  injectInput.addEventListener("keydown", function(e){ if(e.key==="Enter") inject(); });
+
+  connect();
+})();
+</script>
+</body>
+</html>
