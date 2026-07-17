@@ -14,7 +14,7 @@ Qwen3 백본은 오디오 토큰을 다뤄본 적이 없으므로 "말하는 법
 ## 2. Phase 구성
 
 ### Phase 0. 준비 (학습 전)
-- 백본: Qwen3 8B + 오디오 RVQ 토큰 임베딩(Moshi 코드북 값 초기화), self/user 공유 임베딩 + role-axis RoPE 적용 (`ARCHITECTURE.md` §3)
+- 백본: Qwen3 8B + 오디오 RVQ 토큰 임베딩(Moshi 코드북 값 초기화), self/user 공유 임베딩 + Role Token 적용 (`ARCHITECTURE.md` §3)
 - 텍스트 능력 anchor 데이터셋 확보: 순수 텍스트 loss를 전 구간에 소량 섞을 한국어/영어/일본어 텍스트 코퍼스 (catastrophic forgetting 방지용)
 - 진단용 프로빙 세트 준비: turn-taking 관련 내부표현을 측정할 causal probe, 영어 held-out 멀티턴 평가셋, 한국어 오디오 프리픽스(학습엔 미사용, 프로빙 전용)
 - Mimi 한국어 round-trip 재구성 테스트 (`ARCHITECTURE.md` §4.3)
@@ -53,14 +53,14 @@ Qwen3 백본은 오디오 토큰을 다뤄본 적이 없으므로 "말하는 법
 - **커리큘럼 타이밍 자체를 실험 축으로**: (1) 완전 순차 (2) step-0 완전 조인트 (3) 워밍업+조기조인트, 세 조건 비교 — 이 비교 자체가 "언제 다른 언어 신호를 섞어야 cross-lingual transfer가 잘 일어나는가"라는 독립적 finding이 되며, critical period 가설의 실증적 검증이 됨.
 - 코드북 init(Moshi 값) vs random init ablation.
 - KD 방식(teacher-forcing only vs on-policy 혼합) ablation.
-- Self/user 임베딩 분리(원 Moshi) vs 공유+role-axis RoPE(제안) ablation.
+- Self/user 임베딩 분리(원 Moshi) vs 공유+Role Token(제안) ablation. (semantic만 공유 vs semantic+acoustic 모두 공유 축 포함, `ARCHITECTURE.md` §3.6)
 
 **우선순위**: 리소스가 제한적이면 Phase 0~3(본 트랙)을 먼저 완주해 핵심 결과("한국어 멀티턴 창발")부터 확보하고, Phase 4·5는 서브 컨트리뷰션으로 뒤에 배치하는 것이 리스크 관리 측면에서 안전.
 
 ## 3. Phase별 LoRA / QLoRA 사용 여부 분석
 
 ### 3.1 공통 전제
-오디오 RVQ 임베딩 테이블, RQ-Transformer(Depth Transformer) 출력 헤드, role-axis RoPE(고정 오프셋이면 비학습 파라미터)는 Qwen3에 원래 없던 **완전히 새 파라미터**이므로, LoRA는 이들에 적용될 수 없다(LoRA는 기존 가중치 행렬에 저랭크 보정을 더하는 방식). 따라서 이들은 **어느 Phase든 항상 풀 파라미터로 학습**한다. 이하 논의는 "Qwen3 백본(어텐션/FFN)을 얼릴지 여부"에 대한 것이다.
+오디오 RVQ 임베딩 테이블, RQ-Transformer(Depth Transformer) 출력 헤드, Role Token(학습형 additive 벡터 2개)은 Qwen3에 원래 없던 **완전히 새 파라미터**이므로, LoRA는 이들에 적용될 수 없다(LoRA는 기존 가중치 행렬에 저랭크 보정을 더하는 방식). 따라서 이들은 **어느 Phase든 항상 풀 파라미터로 학습**한다. 이하 논의는 "Qwen3 백본(어텐션/FFN)을 얼릴지 여부"에 대한 것이다.
 
 ### 3.2 Phase별 판단
 
@@ -75,7 +75,9 @@ Qwen3 백본은 오디오 토큰을 다뤄본 적이 없으므로 "말하는 법
 | Phase 5 (KD 방식 ablation) | **LoRA/QLoRA로 계산량 절감 가능** | On-policy KD는 학습 중 student 롤아웃 생성이 필요해 계산 비용이 이미 크게 증가 — 이 ablation만큼은 실용적으로 LoRA 사용 고려. |
 
 ### 3.3 자원 재검토 (A100 80GB×4 확보 이후)
-FP8은 A100(Ampere)에서 텐서코어 가속이 불가능(Hopper 이상 지원)하지만, 8-bit optimizer(`PagedAdamW8bit`)로 동일한 메모리 절감 효과를 얻을 수 있다. 4×A100 80GB(총 320GB) + FSDP/ZeRO-3 풀 샤딩 + 8-bit optimizer 조합 시 GPU당 약 20-25GB 수준으로, **Phase 1~3의 Full FT가 자원 제약 없이 가능**하다 (상세 계산은 `PROJECT.md` §5 참조). 따라서 Phase 1~3의 Full FT 권장은 순수하게 방법론적 근거(shortcut 방지)로만 유지하면 되며, 자원 부족을 이유로 한 타협은 필요하지 않다. Phase 4의 LoRA/QLoRA 권장은 자원 문제가 아니라 저데이터 정규화·베이스 보존·빠른 조건 스와핑이라는 방법론적 이유이므로 자원 여유와 무관하게 유효하다.
+FP8은 A100(Ampere)에서 텐서코어 가속이 불가능(Hopper 이상 지원)하지만, 8-bit optimizer(`PagedAdamW8bit`)로 동일한 메모리 절감 효과를 얻을 수 있다.
+
+**분산 전략은 FSDP2(`fully_shard`)로 단일화**한다. FSDP2는 `reshard_after_forward` 플래그 하나로 ZeRO-2급(`False`)/ZeRO-3급(`True`)을 전환하며, 두 모드 모두 grad·optimizer state는 항상 샤딩한다. **9.15B 파라미터의 bf16 사본(GPU당 ~16GB)이 A100 80GB에 여유롭게 상주하므로 파라미터 자체를 샤딩할 필요는 없다는 판단** 하에, 기본값을 `reshard_after_forward=False`(파라미터 복제 유지, grad/optim만 샤딩)로 두고 VRAM이 빠듯할 때만 `True`로 폴백한다. 이 조합 + 8-bit optimizer 시 GPU당 약 40-47GB 수준(파라미터 미샤딩 포함)으로, **Phase 1~3의 Full FT가 자원 제약 없이 가능**하다 (상세 계산은 `PROJECT.md` §5.3 참조). 따라서 Phase 1~3의 Full FT 권장은 순수하게 방법론적 근거(shortcut 방지)로만 유지하면 되며, 자원 부족을 이유로 한 타협은 필요하지 않다. Phase 4의 LoRA/QLoRA 권장은 자원 문제가 아니라 저데이터 정규화·베이스 보존·빠른 조건 스와핑이라는 방법론적 이유이므로 자원 여유와 무관하게 유효하다.
 
 ## 4. Joint Loss 설계 시 주의사항 (Phase 2~3 공통)
 
