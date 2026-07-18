@@ -14,10 +14,11 @@ Qwen3 백본은 오디오 토큰을 다뤄본 적이 없으므로 "말하는 법
 ## 2. Phase 구성
 
 ### Phase 0. 준비 (학습 전)
-- 백본: Qwen3 8B + 오디오 RVQ 토큰 임베딩(Moshi 코드북 값 초기화), self/user 공유 임베딩 + Role Token 적용 (`ARCHITECTURE.md` §3)
+- 백본: Qwen3 8B + 오디오 RVQ 토큰 임베딩, self/user 공유 임베딩 + Role Token 적용 (`ARCHITECTURE.md` §3). **임베딩 초기값은 Moshi의 user 쪽 테이블 `emb.8~15`에서 복사** — user 쪽만 다화자 분포에서 학습돼 고정 화자 편향이 없음 (`ARCHITECTURE.md` §5.4.2)
 - Depth Transformer: **공유 1개 + 공유 프로젝션 + role embedding additive**, batch 2 병렬. **학습 q16(batch 2) / 라이브 추론 q8(batch 1) 모드 스위치** 구현 (`ARCHITECTURE.md` §5.4, §5.0.3)
 - **Warm-start** (`ARCHITECTURE.md` §5.4.1): 백본 dim이 Helium·Qwen3 모두 **4096으로 일치**하고 Depth dim(1024)은 백본과 무관하므로 —
-  - Depth 본체 / 코드북 임베딩 / 코드북별 헤드 → **Moshi에서 warm-start**(동결 Mimi 공유로 audio cardinality 2048 동일)
+  - Depth 본체(per-index 파라미터 포함) / `linears.0~7` / `depformer_emb` → **Moshi에서 warm-start**(동결 Mimi 공유로 audio cardinality 2048 동일)
+  - 오디오 입력 임베딩(공유 8개) → **Moshi `emb.8~15`(user 쪽)에서 복사**
   - $z_s$ 프로젝션(4096→1024) → Moshi 가중치로 **초기화하되 재학습**(두 4096 공간은 정렬돼 있지 않음)
   - 텍스트 임베딩/헤드 → 전이 불가(32000 vs 151936), Qwen3 자체 사용
 - **Delay 설정** (Table 1 준용): acoustic delay 2(pre) → 1(이후), text delay ±0.6(pre) → 0(이후)
@@ -80,7 +81,7 @@ Qwen3 백본은 오디오 토큰을 다뤄본 적이 없으므로 "말하는 법
 - **voice-prompt / interpolation ablation**: voice-prompt 유무, ko-ka interpolation 유무가 클로닝·prosody graft에 주는 효과.
 - **User-stream 예측 구조 ablation (PersonaPlex 순차 vs Haan 병렬)**: PersonaPlex식 16-step 순차 Depth vs 제안한 공유-Depth batch-2 병렬(split MLP + role emb, `ARCHITECTURE.md` §5.4)을 **품질 동등성 + latency**로 비교. 순차는 warmup 단계가 아니라 **대조군 baseline**으로 별도 학습. 지표는 특히 **user 예측 품질 + 오버랩/barge-in 자연스러움** 두 축(프레임 내 상관 손실이 실제로 유의미한지 판정). 필요 시 병렬에 경량 cross-attention 복원안 비교 포함.
   - **사전 파일럿(de-risk)**: 본 학습 컴퓨트 투입 전, 소규모로 순차 vs 병렬을 붙여 위 두 지표의 동등성만 선확인한 뒤 병렬로 커밋. (순차 풀학습 후 전환이 아니라 소규모 bake-off)
-- 코드북 init(Moshi 값) vs random init ablation.
+- 코드북 init ablation: **Moshi user 테이블(`emb.8~15`, 채택) vs self 테이블(`emb.0~7`) vs random init**. 채택안의 근거(user 쪽이 다화자 분포)가 실제로 클로닝·화자 일반화에서 이득으로 나타나는지 정량 확인 (`ARCHITECTURE.md` §5.4.2).
 - KD 방식(teacher-forcing only vs on-policy 혼합) ablation.
 - Self/user 임베딩 분리(원 Moshi) vs 공유+Role Token(제안) ablation. (semantic만 공유 vs semantic+acoustic 모두 공유 축 포함, `ARCHITECTURE.md` §3.6·§6.2)
 
