@@ -145,6 +145,22 @@ graft 규율:
 4. **turn-event 국소 적용**: barge-in/overlap 프레임에만 acoustic KD.
 5. **guard로 early-stop**: turn-event 구간의 화자 유사도를 모니터링, prosody 이득 plateau거나 클로닝 드리프트가 임계 초과 시 정지. ("few step"을 고정 숫자가 아니라 드리프트 지표로 멈춤)
 
+### 5.4 User-stream 예측 — 공유 Depth 병렬 분리 (PersonaPlex 순차 대비)
+
+**배경 (세 설계 비교)**:
+- **Moshi**: Depth는 self 코드북(dep_q=8)만 예측. user 스트림은 입력 조건일 뿐 예측 대상 아님.
+- **PersonaPlex**: Depth의 step을 16으로 늘려 self 8 + user 8을 **한 자기회귀 롤아웃으로 순차 예측**(프레임 내 user가 self 뒤에 조건부). 사람도 상대 발화를 예측·모델링하듯 user 예측 능력을 갖추는 것이 목적.
+- **Haan (채택)**: user 예측 능력의 **목적은 PersonaPlex와 동일**(유지되는 능력)하되, 순차의 부자연스러움·속도 저하를 피한다.
+
+**채택 설계**: Depth Transformer는 **1개로 통합**(가중치 공유 = self 학습 처리 능력이 user에도 적용되는 정보 효율, §6.1 논리와 동일). Temporal의 context $z_s$를 **MLP로 2채널($z_{self}, z_{user}$)로 분리**하고, **role embedding을 Depth 입력에 명시 주입**한 뒤 **batch=2로 묶어 병렬 입력**. 각 스트림 8-step으로 코드북 예측.
+- **속도**: 순차 16-step 대신 **8-step × batch 2**. user 예측을 추론에서도 유지한 채로 depth 자기회귀 길이가 절반 → 약 2배 빠름. (속도 이득은 user를 버려서가 아니라 시퀀스를 늘리는 대신 배치로 병렬화한 데서 나옴)
+- 구현: "UpConv"가 아니라 채널 2배 라우팅 MLP(또는 2-헤드). Temporal은 불변, Depth 입력 경로만 변경.
+
+**프레임 내 self↔user 상관 트레이드오프 (수용, 안전판 보유)**:
+- 병렬은 $p(\text{self}_t\mid z_s)\cdot p(\text{user}_t\mid z_s)$로 프레임 내 순간 상관을 조건부 독립으로 둔다. 이는 오히려 **Moshi 본래 factorization(모든 프레임 토큰을 $z_s$에서 생성)에 충실**하며, PersonaPlex의 프레임 내 self→user 결합은 효용 미입증의 추가 가정이다.
+- **스트리밍 인과성**: 추론 시 self_t는 동시 프레임 user_t를 아직 못 들은 상태에서 생성되므로 self_t가 simultaneous user_t에 의존하는 것은 인과적으로 불가능. 따라서 프레임 내 결합이 영향을 주는 곳은 **self 생성 품질(진짜 출력)이 아니라 user 예측 sharpness(aux 능력)뿐**.
+- **결정**: "어쩔 수 없다"가 아니라 **"측정해 무시할 만함을 확인"**으로 굳힌다(소규모 순차 vs 병렬 bake-off, `TRAINING_CURRICULUM.md` §2 Phase 5). 만약 오버랩 자연스러움까지 유의미하게 떨어지면 **두 배치 스트림 간 경량 cross-attention을 Depth 내부에 추가**해 결합을 국소 복원(여전히 8-step, 순차 16-step 비용 없음). 즉 지금 병렬로 커밋해도 리스크가 갇히지 않는다.
+
 ## 6. Role 구분 메커니즘: 채택안과 후속 연구 로드맵 (구 `FUTURE.md` 통합)
 
 본 절은 §2~3에서 다룬 self/user 오디오 임베딩 분리 재설계를, **본 트랙 채택안(Role Token)**과 그 **후속 연구 두 계열**로 정리한다. 두 후속 논문은 서로를 전제하지 않고 각자 완결된 기여를 갖되, 같은 아이디어 계열(role 구분을 임베딩 분리가 아닌 별도 신호로 옮긴다)에서 파생된다.

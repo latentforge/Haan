@@ -15,6 +15,7 @@ Qwen3 백본은 오디오 토큰을 다뤄본 적이 없으므로 "말하는 법
 
 ### Phase 0. 준비 (학습 전)
 - 백본: Qwen3 8B + 오디오 RVQ 토큰 임베딩(Moshi 코드북 값 초기화), self/user 공유 임베딩 + Role Token 적용 (`ARCHITECTURE.md` §3)
+- Depth Transformer: **공유 1개 + context split MLP + role embedding 주입**, self·user 코드북 헤드 모두 구성(user 예측 능력). 학습 batch=2 병렬(self/user), 추론도 능력 유지 (`ARCHITECTURE.md` §5.4)
 - 텍스트 능력 anchor 데이터셋 확보: 순수 텍스트 loss를 전 구간에 소량 섞을 한국어/영어/일본어 텍스트 코퍼스 (catastrophic forgetting 방지용)
 - 진단용 프로빙 세트 준비: turn-taking 관련 내부표현을 측정할 causal probe, 영어 held-out 멀티턴 평가셋, 한국어 오디오 프리픽스(학습엔 미사용, 프로빙 전용)
 - Mimi 한국어 round-trip 재구성 테스트 (`ARCHITECTURE.md` §4.3)
@@ -66,6 +67,8 @@ Qwen3 백본은 오디오 토큰을 다뤄본 적이 없으므로 "말하는 법
 - **★ semantic-distill on/off ablation (핵심 하중 축)**: 같은 Mimi에서 level-0를 WavLM-distilled semantic VQ vs 순수 acoustic VQ로 바꿔 **동일 파이프라인 전이 성공률**을 비교. "Mimi semantic 토큰이 전이의 원인"임을 통제된 델타로 증명 — 팀의 코덱 레벨 핵심 명제("Mimi가 다른 RVQ와 달리 semantic 토큰을 쓰는 이점"). 코덱 자체를 바꾸는 비교(예: Qwen3-Omni 계열)는 교란 변수가 많아 보조 arm. (선행: Qwen3-Omni 토크나이저에 semantic 채널이 실제로 없는지 스펙 확인)
 - **KD-scope ablation**: semantic-only KD vs semantic+acoustic KD → 음색 유출 vs 타이밍/prosody 전이의 트레이드오프 정량화(Phase 3.5 graft 효과 포함).
 - **voice-prompt / interpolation ablation**: voice-prompt 유무, ko-ka interpolation 유무가 클로닝·prosody graft에 주는 효과.
+- **User-stream 예측 구조 ablation (PersonaPlex 순차 vs Haan 병렬)**: PersonaPlex식 16-step 순차 Depth vs 제안한 공유-Depth batch-2 병렬(split MLP + role emb, `ARCHITECTURE.md` §5.4)을 **품질 동등성 + latency**로 비교. 순차는 warmup 단계가 아니라 **대조군 baseline**으로 별도 학습. 지표는 특히 **user 예측 품질 + 오버랩/barge-in 자연스러움** 두 축(프레임 내 상관 손실이 실제로 유의미한지 판정). 필요 시 병렬에 경량 cross-attention 복원안 비교 포함.
+  - **사전 파일럿(de-risk)**: 본 학습 컴퓨트 투입 전, 소규모로 순차 vs 병렬을 붙여 위 두 지표의 동등성만 선확인한 뒤 병렬로 커밋. (순차 풀학습 후 전환이 아니라 소규모 bake-off)
 - 코드북 init(Moshi 값) vs random init ablation.
 - KD 방식(teacher-forcing only vs on-policy 혼합) ablation.
 - Self/user 임베딩 분리(원 Moshi) vs 공유+Role Token(제안) ablation. (semantic만 공유 vs semantic+acoustic 모두 공유 축 포함, `ARCHITECTURE.md` §3.6·§6.2)
