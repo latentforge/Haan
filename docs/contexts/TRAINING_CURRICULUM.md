@@ -15,7 +15,16 @@ Qwen3 백본은 오디오 토큰을 다뤄본 적이 없으므로 "말하는 법
 
 ### Phase 0. 준비 (학습 전)
 - 백본: Qwen3 8B + 오디오 RVQ 토큰 임베딩(Moshi 코드북 값 초기화), self/user 공유 임베딩 + Role Token 적용 (`ARCHITECTURE.md` §3)
-- Depth Transformer: **공유 1개 + context split MLP + role embedding 주입**, self·user 코드북 헤드 모두 구성(user 예측 능력). 학습 batch=2 병렬(self/user), 추론도 능력 유지 (`ARCHITECTURE.md` §5.4)
+- Depth Transformer: **공유 1개 + 공유 프로젝션 + role embedding additive**, batch 2 병렬. **학습 q16(batch 2) / 라이브 추론 q8(batch 1) 모드 스위치** 구현 (`ARCHITECTURE.md` §5.4, §5.0.3)
+- **Warm-start** (`ARCHITECTURE.md` §5.4.1): 백본 dim이 Helium·Qwen3 모두 **4096으로 일치**하고 Depth dim(1024)은 백본과 무관하므로 —
+  - Depth 본체 / 코드북 임베딩 / 코드북별 헤드 → **Moshi에서 warm-start**(동결 Mimi 공유로 audio cardinality 2048 동일)
+  - $z_s$ 프로젝션(4096→1024) → Moshi 가중치로 **초기화하되 재학습**(두 4096 공간은 정렬돼 있지 않음)
+  - 텍스트 임베딩/헤드 → 전이 불가(32000 vs 151936), Qwen3 자체 사용
+- **Delay 설정** (Table 1 준용): acoustic delay 2(pre) → 1(이후), text delay ±0.6(pre) → 0(이후)
+- **토크나이저 설정** (`ARCHITECTURE.md` §7.6): 예약 특수 토큰 슬롯에 **PAD/EPAD 신규 배정**(`<|im_end|>`/`<|im_start|>` 재사용 금지). **배치 `pad_token`과 스트림 PAD를 분리** — 배치 pad는 loss 완전 마스킹, 스트림 PAD는 예측 대상이되 다운웨이팅.
+- **Instruction template 확정** (`ARCHITECTURE.md` §7): Zone A 정적 ChatML prefix(dense, loss 마스킹) → Zone B 오프닝 인사 voice prompt(정렬 전사 포함) → Zone C 대화(PAD/EPAD, 턴 마커 없음). `<|im_end|>`는 세션 종료에만.
+- **텍스트 전용 사전 프로브** (`ARCHITECTURE.md` §7.7, 오디오 파이프라인 불필요): ① 닫히지 않는 assistant + PAD 스트림에서 지시 준수·품질 유지 여부(non-thinking 모드 기준) ② "발화 완결=PAD 전환" 재매핑 학습 속도
+- **라이브 추론은 non-thinking 모드**로 운용(`/no_think` 계열 스위치 또는 `enable_thinking=False`) — 텍스트 채널 12.5 tok/s 제약 회피 (`ARCHITECTURE.md` §7.5)
 - 텍스트 능력 anchor 데이터셋 확보: 순수 텍스트 loss를 전 구간에 소량 섞을 한국어/영어/일본어 텍스트 코퍼스 (catastrophic forgetting 방지용)
 - 진단용 프로빙 세트 준비: turn-taking 관련 내부표현을 측정할 causal probe, 영어 held-out 멀티턴 평가셋, 한국어 오디오 프리픽스(학습엔 미사용, 프로빙 전용)
 - Mimi 한국어 round-trip 재구성 테스트 (`ARCHITECTURE.md` §4.3)
@@ -36,6 +45,8 @@ Qwen3 백본은 오디오 토큰을 다뤄본 적이 없으므로 "말하는 법
 - Loss 설계 주의사항:
   - 세 신호(semantic KD / 한국어 TTS / voice-cloning CE)의 loss scale/gradient norm 모니터링 — 한쪽이 지배하지 않도록 정규화
   - 침묵/비발화 프레임 클래스 불균형은 **semantic KD 내부의 프레임 가중치**로 처리(발화 전환 구간 가중치). 별도 보조 loss가 아님(self/user 구분은 Role Token, 발화/침묵은 semantic 토큰이 이미 담당하므로 중복 항 불필요) — `RISKS_AND_DIAGNOSTICS.md` §7.4
+  - **토큰 종류별 loss 가중치** (PersonaPlex 준용, `ARCHITECTURE.md` §7.6): 스트림 **PAD 텍스트 토큰 ×0.3**, **non-semantic 오디오 토큰 ×0.02**를 기본값으로 두고 튜닝. 텍스트 채널의 PAD 편중(약 65%) 대응.
+  - **시스템 프롬프트(Zone A) 구간은 loss 마스킹** — 모델이 프롬프트를 "생성하는 법"을 배우지 않고 조건으로만 쓰도록.
   - 텍스트 anchor loss 계속 유지
 - 언어-태스크 상관관계 완화: 가능하다면 영어 데이터 일부를 싱글턴처럼 잘라 섞어, "언어"와 "턴 구조"가 완벽히 상관되지 않도록 배치 구성 (`RISKS_AND_DIAGNOSTICS.md` §1 참조)
 - **체크포인트 B**: 영어 held-out 멀티턴 성능이 한국어 투입 이후 급격히 떨어지는지(간섭 여부) 추적. 한국어 프리픽스 turn-taking 프로빙 재측정 — Phase 1 대비 상승 여부가 핵심 신호
