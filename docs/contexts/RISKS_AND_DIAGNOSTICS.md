@@ -7,7 +7,7 @@
 **메커니즘**: 학습 데이터 구조상 "영어=멀티턴, 한국어=싱글턴"이라는 상관관계가 완벽하게 존재한다. 모델이 turn-taking 능력을 언어-독립적인 구조적 패턴으로 학습하는 대신, "이 발화가 한국어 음향 토큰이면 한 턴 말하고 멈춰라"는 **지름길(shortcut)**을 학습할 위험이 크다. 이렇게 되면 한국어 입력에서는 사용자가 아무리 오래 말하거나 끼어들어도 모델이 계속 반이중처럼 행동할 수 있다. 일반적인 딥러닝의 shortcut learning 문제와 동일한 패턴.
 
 **대응**:
-- 배치 구성 시 언어와 태스크(멀티턴 vs 싱글턴)의 상관관계 완화 — 영어 데이터 일부를 싱글턴처럼 잘라 섞기 (`DATA_STRATEGY.md` §4.3의 스켈레톤 이식과 연계)
+- 배치 구성 시 언어와 태스크(멀티턴 vs 싱글턴)의 상관관계 완화 — 영어 데이터 일부를 싱글턴처럼 잘라 섞기 (스켈레톤 이식(`DATA_STRATEGY.md` §4.3)은 보류/비채택이나, 이 de-correlation 배치 구성 자체는 독립적으로 유효)
 - Turn-taking 관련 내부 표현이 언어에 무관하게 활성화되는지 causal probing으로 직접 측정
 - Phase 1~2에서 LoRA가 아닌 Full FT 사용 — 저랭크 어댑터는 shortcut 쪽으로 더 쉽게 수렴하는 경향 (`TRAINING_CURRICULUM.md` §3.2)
 
@@ -48,8 +48,10 @@
 
 ## 7. KD(Knowledge Distillation) 관련 주의점
 
+> **채택 요약 (`ARCHITECTURE.md` §5.1)**: KD는 **Mimi semantic 토큰(level-0) logit**에 한정한다. acoustic(1~7)은 기본 KD 제외(음색은 voice-prompt), 단계적 graft만 별도(Phase 3.5). hidden-state KD·텍스트 logit KD는 폐기(§7.1·§7.2). KD의 실질 목적은 turn-taking 동시성 행동 전이.
+
 ### 7.1 백본 아키텍처 불일치로 인한 KD 레벨 제한
-Helium(원본 Moshi)과 Qwen3 8B는 hidden dim, layer 수, attention 구조가 다르므로 intermediate feature-level KD(hidden state matching)는 사실상 불가능. KD 가능 지점은 오디오 RVQ 토큰 출력 로짓(같은 Mimi 코덱 공유)과 텍스트 스트림의 확률분포/샘플링된 시퀀스로 제한됨.
+Helium(원본 Moshi)과 Qwen3 8B는 hidden dim, layer 수, attention 구조가 다르므로 intermediate feature-level KD(hidden state matching)는 사실상 불가능 → **hidden-state KD 폐기**. KD 가능 지점은 오디오 RVQ 토큰 출력 로짓(같은 Mimi 코덱 공유)과 텍스트 스트림으로 제한되며, 그중 **semantic 토큰(level-0) logit KD가 주 경로**다(공유 코덱이라 출력공간 동일 → projection 불필요).
 
 ### 7.2 텍스트 스트림 토크나이저 불일치
 Helium과 Qwen3의 텍스트 토크나이저가 다르므로 내적 독백(Inner Monologue) 텍스트 토큰에 대해서는 로짓 단위 KD가 불가능. 티처 생성 텍스트를 디코딩 → 리토크나이즈해서 student 타겟으로 쓰는 시퀀스 레벨 방식(SeqKD)이 필요하며, 이 경우 소프트 타겟의 정보량(분포 전체)이 사라지고 하드 라벨만 남는 손실이 있음.
@@ -65,6 +67,8 @@ Full-duplex 멀티턴 대화는 긴 자기회귀 시퀀스. 티처의 정답 궤
 ### 7.4 침묵/비발화 토큰의 클래스 불균형
 대화 대부분이 침묵/청취 상태이고 발화 프레임은 상대적으로 희소. 순수 KD loss(프레임별 KL)를 그대로 쓰면 모델이 "항상 침묵을 예측"하는 쪽으로 쉽게 수렴할 수 있음. 발화/전환 구간에 가중치를 더 주는 등 불균형 처리 필요.
 
+**주의(중복 항 금지)**: 이 불균형 처리는 **semantic KD 내부의 프레임 가중치**로 해결한다. 별도의 "발화/비발화 보조 distill" 항을 만들 필요가 없다 — self/user 역할 구분은 Role Token(`ARCHITECTURE.md` §3·§6.2)이, 발화/침묵 여부는 semantic 토큰 값 자체가 이미 담당하므로, 별도 신호를 추가하면 중복이다.
+
 ### 7.5 오디오 코드북 임베딩 드리프트
 Moshi 코드북 값으로 초기화한 임베딩이 학습 초반부터 급격히 업데이트되면, KD 타겟(원본 Moshi 로짓)이 가리키는 "의미"와 student의 현재 임베딩 공간이 어긋나기 시작. 초반 몇 스텝은 오디오 임베딩(최소한 코드북 부분)을 freeze하거나 낮은 lr로 warmup한 뒤 풀어주는 전략 고려.
 
@@ -77,7 +81,13 @@ Qwen3 8B에 오디오 토큰을 얹고 KD+TTS joint loss로 계속 학습하면,
 ### 7.8 스트리밍 프레임 정렬
 두 스트림(발화/청취)이 프레임 단위로 동기화되어야 하는데, Qwen3 백본의 시퀀스 처리 방식(캐싱, 포지션 인코딩)이 원본 Moshi의 프레임 레이트/윈도우 가정과 다르면 KD 타겟과 student 예측 시점 간 **temporal misalignment**가 생길 수 있음. 코드 레벨에서 조용히 발생하는 버그이므로, 특정 turn-taking 이벤트 시점에서 두 모델의 예측이 같은 timestep을 가리키는지 별도 검증 필요.
 
-**우선순위**: §7.3(exposure bias)과 §7.6(catastrophic forgetting)이 논문 성패에 가장 직접적 영향을 줄 것으로 예상. §7.1·7.2는 설계 단계에서 KD 손실 함수를 어디에 걸지 미리 명확히 정의해두면 자연히 해결됨.
+### 7.9 Acoustic graft 시 음색 드리프트 (Phase 3.5)
+turn-event 국소 acoustic KD를 얹을 때, teacher의 고정 화자(Moshi-ko/ka) 음색이 클로닝된 목소리로 새어들 위험. 특히 **timbre와 prosody의 학습 속도차**로 인해 "prosody는 아직 안 왔는데 timbre는 이미 샌" 최악 지점이 생길 수 있음. 대응(`ARCHITECTURE.md` §5.3): 페어드 voice-prompt + ko-ka interpolation + 저weight/저LR + turn-event 국소화 + **guard 지표(turn-event 구간 화자 유사도)로 early-stop**. 진단: 일반 발화가 아니라 **barge-in/interruption 프레임의 화자 유사도**를 국소 측정해야 드리프트를 잡음.
+
+### 7.10 voice-prompt와 콘텐츠 결합의 실패 모드
+과거 "참조 + learnable VQ 삽입" 시도는 음색은 이동했으나 content가 붕괴(word salad, `ARCHITECTURE.md` §4.4)했음. PersonaPlex가 learnable VQ 없이 프리픽스만으로 달성함을 확인했으므로 그 방식(§5.2)을 따르되, 도입 시 **텍스트 채널을 바꿨을 때 오디오가 따라 바뀌는지(결합 강도)와, voice-prompt가 content 예측을 오염시키지 않는지**를 별도 검증. system prompt 구간 loss 마스킹·non-semantic 다운웨이팅 누락이 흔한 원인일 수 있음.
+
+**우선순위**: §7.3(exposure bias)과 §7.6(catastrophic forgetting)이 논문 성패에 가장 직접적 영향을 줄 것으로 예상. §7.1·7.2는 설계 단계에서 KD 손실 함수를 어디에 걸지 미리 명확히 정의해두면 자연히 해결됨. §7.9는 Phase 3.5에 진입할 때만 활성화되는 조건부 리스크.
 
 ## 8. 컨트리뷰션 성립 여부에 대한 메타 검토
 
