@@ -15,8 +15,8 @@ from collections import Counter
 import numpy as np
 import pytest
 
-from training.data.sampler import GroupIndex, MixingBatchSampler, assert_group_sync
-from training.data.schedule import MixSchedule
+from training.datasets.sampler import GroupIndex, MixingBatchSampler, assert_group_sync
+from training.datasets.schedule import MixSchedule
 
 GROUPS = ("en_kd", "en_solo", "ko_tts", "text_anchor")
 

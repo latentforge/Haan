@@ -5,7 +5,7 @@ file exists because plan section 7.8 misalignment converges, never raises, and o
 shows up as ~80 ms of turn-taking skew in the finished model.
 
 Inputs are built by a local helper that mimics what MoshiKDDataset produces
-(torch tensors, delay-free, roles already resolved). training.data.dataset is
+(torch tensors, delay-free, roles already resolved). training.datasets.dataset is
 deliberately not imported: it is being written concurrently, and the collator's
 contract is `list[KDSample]`, not "whatever the dataset happens to return".
 """
@@ -27,7 +27,7 @@ from tests.conftest import (
     ramp_teacher,
     ramp_text,
 )
-from training.data.collator import (
+from training.datasets.collator import (
     ZONE_A,
     ZONE_B,
     ZONE_C,
@@ -36,8 +36,8 @@ from training.data.collator import (
     KDCollator,
     KDCollatorConfig,
 )
-from training.data.item import validate_item
-from training.data.text_collator import TextAnchorCollator, TextAnchorCollatorConfig
+from training.datasets.item import validate_item
+from training.datasets.text_collator import TextAnchorCollator, TextAnchorCollatorConfig
 
 K = NUM_CODEBOOKS
 
@@ -690,13 +690,13 @@ def test_text_anchor_collator_batch(tokens):
 
 # --------------------------------------------------------------- config asserts
 def test_missing_token_ids_name_the_file():
-    from training.data.config import TokenConfig
+    from training.datasets.config import TokenConfig
     with pytest.raises(AssertionError, match="configs/tokens.yaml"):
         KDCollator(KDCollatorConfig(tokens=TokenConfig()))
 
 
 def test_stream_pad_equal_batch_pad_raises():
-    from training.data.config import TokenConfig
+    from training.datasets.config import TokenConfig
     bad = TokenConfig(
         text_pad_id=5, text_epad_id=6, batch_pad_id=5, audio_init_id=CODEBOOK_SIZE,
         silence_bank=tuple((c,) for c in DUMMY_SILENCE), mimi_ckpt_id="x",

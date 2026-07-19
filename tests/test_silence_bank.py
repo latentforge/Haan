@@ -31,8 +31,8 @@ import pytest
 
 from conftest import DUMMY_SILENCE, DUMMY_SILENCE_BANK, make_solo_sample
 from data_pipeline.schema import CODEBOOK_SIZE, NUM_CODEBOOKS
-from training.data.config import DataConfig, TokenConfig
-from training.data.dataset import MoshiKDDataset
+from training.datasets.config import DataConfig, TokenConfig
+from training.datasets.dataset import MoshiKDDataset
 
 K = NUM_CODEBOOKS
 P = len(DUMMY_SILENCE_BANK[0])

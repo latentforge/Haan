@@ -27,9 +27,9 @@ import torch
 
 from conftest import make_en_kd_sample, make_solo_sample, make_text_anchor_sample
 from data_pipeline.schema import NUM_CODEBOOKS
-from training.data.collator import DelayConfig, KDCollator, KDCollatorConfig
-from training.data.item import SAMPLE_TYPE_IDS
-from training.data.loader import (
+from training.datasets.collator import DelayConfig, KDCollator, KDCollatorConfig
+from training.datasets.item import SAMPLE_TYPE_IDS
+from training.datasets.loader import (
     GROUP_ALIASES,
     HEAVY_GROUPS,
     ConcatSources,
@@ -40,7 +40,7 @@ from training.data.loader import (
     build_dataloader,
     group_dir,
 )
-from training.data.text_collator import TextAnchorCollator, TextAnchorCollatorConfig
+from training.datasets.text_collator import TextAnchorCollator, TextAnchorCollatorConfig
 
 K = NUM_CODEBOOKS
 GROUPS = ("en_kd", "ko_tts", "text_anchor")
@@ -591,7 +591,7 @@ def test_build_never_names_the_exact_command_for_the_missing_group(prepared, dat
         )
 
     msg = str(ei.value)
-    assert "python -m training.data.prepare --group ko_tts" in msg
+    assert "python -m training.datasets.prepare --group ko_tts" in msg
     assert str(Path(data_cfg.root) / "ko_tts" / "train") in msg
 
 
@@ -624,7 +624,7 @@ def test_assert_can_build_refuses_heavy_groups_in_a_multi_rank_job(group):
         with pytest.raises(RuntimeError) as ei:
             _assert_can_build(build, group, world_size=4)
         msg = str(ei.value)
-        assert f"python -m training.data.prepare --group {group}" in msg
+        assert f"python -m training.datasets.prepare --group {group}" in msg
         assert group in msg and "4-rank" in msg
 
 
@@ -999,7 +999,7 @@ def test_bidirectional_reuse_over_the_real_zeroth_corpus(tokens):
     where lengths, speakers and text distributions are whatever the pipeline
     really produced.
     """
-    from training.data.config import DataConfig
+    from training.datasets.config import DataConfig
 
     cfg = DataConfig(
         root=str(REAL_ROOT), tokens=tokens, max_frames=750,

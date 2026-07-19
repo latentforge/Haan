@@ -1,4 +1,4 @@
-"""Shared fixtures for the training/data test suite.
+"""Shared fixtures for the training/datasets test suite.
 
 Fixtures build real Arrow datasets through Sample.to_row() + arrow_features() --
 the same path prepare_dataset.write() uses. Arrow is never mocked: the flat-store
@@ -18,7 +18,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from data_pipeline.schema import CODEBOOK_SIZE, NUM_CODEBOOKS, Sample, arrow_features  # noqa: E402
-from training.data.config import DataConfig, TokenConfig  # noqa: E402
+from training.datasets.config import DataConfig, TokenConfig  # noqa: E402
 
 # Dummy ids standing in for the still-unassigned reserved Qwen3 slots. Tests must
 # never depend on the real values -- that is the whole point of config injection.
