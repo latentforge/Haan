@@ -3,7 +3,7 @@
 Three sample_types share a single Arrow schema:
   - "en_kd":       dual-Moshi self-talk generated dialogues. Both A/B streams +
                    teacher top-k logits for both streams.
-  - "ko_tts":      Korean singleton TTS (Zeroth/KSS/CSS10/CommonVoice). Only codes_a
+  - "ko_tts":      Korean singleton TTS (Zeroth/KSS/CommonVoice). Only codes_a
                    used (mono), ground-truth CE.
   - "text_anchor": plain text. Only text_tokens_a used (not frame-aligned; plain
                    token sequence).
@@ -33,7 +33,7 @@ SAMPLE_TYPES = ("en_kd", "ko_tts", "text_anchor")
 
 # ---- prepared-artifact schema version ----
 # Bump on ANY change to arrow_features(): added/removed/retyped field, or a change
-# to the flat-store convention. training/data/prepare.py stamps this into each
+# to the flat-store convention. training/datasets/prepare.py stamps this into each
 # group's _SUCCESS.json sentinel and rebuilds automatically when it no longer
 # matches, so stale prepared data can never be read back through a newer schema.
 # (Planned bump: adding `zone_a_frames` per plan section 3.7.)
@@ -45,7 +45,13 @@ SAMPLE_TYPES = ("en_kd", "ko_tts", "text_anchor")
 #     RawEntry.speaker and base.py wrote it into the per-sample .json; it was then
 #     dropped at the Arrow boundary. Corpora prepared before this bump have no
 #     speaker column and must be rebuilt rather than read back with an empty one.
-SCHEMA_VERSION = 2
+#
+# v3: teacher_topk_val_* retyped float32 -> float16, per plan section 2.8. The
+#     generator already dumps fp16 and the Dataset already casts back to fp16 on
+#     load, so f32 on disk was pure round-trip cost on the single largest tensor
+#     in the corpus (K*T*topk per stream) with no precision to show for it.
+#     pyarrow halffloat still reads zero-copy, so the fast path is unaffected.
+SCHEMA_VERSION = 3
 
 
 def arrow_features() -> Features:
@@ -68,9 +74,9 @@ def arrow_features() -> Features:
             "text_tokens_a": Sequence(Value("int32")),
             "text_tokens_b": Sequence(Value("int32")),
             # teacher top-k (flat: K*T*topk). Filled only for en_kd.
-            "teacher_topk_val_a": Sequence(Value("float32")),  # cast to fp16 after loading
+            "teacher_topk_val_a": Sequence(Value("float16")),
             "teacher_topk_idx_a": Sequence(Value("int16")),
-            "teacher_topk_val_b": Sequence(Value("float32")),
+            "teacher_topk_val_b": Sequence(Value("float16")),
             "teacher_topk_idx_b": Sequence(Value("int16")),
             "topk": Value("int16"),
             # generation metadata for reproducibility/filtering/analysis
@@ -120,7 +126,19 @@ class Sample:
             topk = int(self.teacher_topk_val_a.shape[-1])
 
         def flat(x, dtype):
-            return [] if x is None else np.ascontiguousarray(x, dtype=dtype).ravel().tolist()
+            """Flat 1D **numpy**, not a Python list.
+
+            `.tolist()` here cost ~18x: a 2-byte int16 becomes a 28-byte Python
+            int, and pyarrow immediately re-packs it back into the same 2 bytes.
+            Invisible at 150 rows, fatal at corpus scale -- the teacher top-k is
+            (K, T, topk) per stream, so 10k en_kd dialogues is ~30 GB as arrays
+            and ~430 GB as lists. pyarrow accepts numpy for Sequence(Value(...))
+            directly, and row_to_arrays already goes through np.asarray on read.
+            """
+            return (
+                np.empty(0, dtype=dtype) if x is None
+                else np.ascontiguousarray(x, dtype=dtype).ravel()
+            )
 
         return {
             "sample_type": self.sample_type,
@@ -130,9 +148,9 @@ class Sample:
             "codes_b": flat(self.codes_b, np.int16),
             "text_tokens_a": flat(self.text_tokens_a, np.int32),
             "text_tokens_b": flat(self.text_tokens_b, np.int32),
-            "teacher_topk_val_a": flat(self.teacher_topk_val_a, np.float32),
+            "teacher_topk_val_a": flat(self.teacher_topk_val_a, np.float16),
             "teacher_topk_idx_a": flat(self.teacher_topk_idx_a, np.int16),
-            "teacher_topk_val_b": flat(self.teacher_topk_val_b, np.float32),
+            "teacher_topk_val_b": flat(self.teacher_topk_val_b, np.float16),
             "teacher_topk_idx_b": flat(self.teacher_topk_idx_b, np.int16),
             "topk": topk,
             "gen_meta": {
@@ -147,7 +165,7 @@ class Sample:
 
 
 def row_to_arrays(row: dict) -> dict:
-    """Arrow row → restore original shapes such as (K, T). Used by training/data/dataset.py."""
+    """Arrow row → restore original shapes such as (K, T). Used by training/datasets/dataset.py."""
     T = int(row["num_frames"])
     K = NUM_CODEBOOKS
     topk = int(row["topk"])

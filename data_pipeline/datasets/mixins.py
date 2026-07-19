@@ -34,6 +34,22 @@ from ..schema import FRAME_RATE_HZ, NUM_CODEBOOKS, SAMPLE_RATE, Sample
 # the `moshi` package is not installed here, and `kmhf/hf-moshiko` is what the
 # repo's working codec code (project_amnesty/.../scenario_run.py) and
 # training/tools/derive_silence_codes.py both use.
+#
+# Verified identical to the codec the en_kd generator uses. The Colab generator
+# goes through the `moshi` package, which loads
+# kyutai/moshiko-pytorch-bf16 :: tokenizer-e351c8d8-checkpoint125.safetensors
+# (loaders.MIMI_NAME) -- a different repo and a different tensor naming scheme,
+# so "same codec" was an assumption, and ARCHITECTURE.md 5.1's "shared frozen
+# codec => identical teacher/student output space" rests on it. Checked directly:
+# both hold 96,151,393 audio_encoder parameters, and casting kyutai's fp32
+# codebooks to bf16 reproduces kmhf's **bit-for-bit** for the semantic level-0
+# codebook and all 7 acoustic levels. Same weights, kmhf is just the bf16 cast.
+#
+# Caveat worth knowing: quantization is a nearest-neighbour lookup, so the bf16
+# rounding (rel ~2e-3 on the codebook vectors) can flip the assigned code for a
+# frame sitting on a Voronoi boundary. That never matters here -- no audio is
+# encoded through both paths and compared -- but it would if anyone ever tried to
+# reproduce en_kd codes locally and expected an exact match.
 DEFAULT_MIMI_CKPT = "kmhf/hf-moshiko"
 
 
@@ -91,10 +107,15 @@ def align_uniform(
     return stream
 
 
-def align_timestamps(
-    words: list[dict], num_frames: int, tokenizer, cfg: TextTokCfg
+def place_words_at_frames(
+    words: list[tuple[str, int]], num_frames: int, tokenizer, cfg: TextTokCfg
 ) -> np.ndarray:
-    """words: [{"word": str, "start": sec, "end": sec}] (forced-aligner output).
+    """(word, onset_frame) pairs → frame-aligned stream. Onsets are integer frames.
+
+    Split out of align_timestamps so callers that already know the onset *frame*
+    (retokenize_frame_aligned) never round-trip through seconds: frame/12.5*12.5
+    is not exact in float64 (frame 7 → 6.999...), and int() would truncate to the
+    previous frame.
 
     EPAD goes one frame *before* each word's onset, matching align_uniform and
     ARCHITECTURE.md §5.0.1. Placing it at the word's end frame instead would make
@@ -102,12 +123,12 @@ def align_timestamps(
     """
     stream = np.full(num_frames, cfg.text_pad_id, dtype=np.int32)
     cursor = 0
-    for i, w in enumerate(words):
-        ids = tokenizer.encode((" " if i else "") + w["word"], add_special_tokens=False)
+    for i, (word, onset) in enumerate(words):
+        ids = tokenizer.encode((" " if i else "") + word, add_special_tokens=False)
         if not ids:
             continue
         # cursor + 1 leaves a frame for EPAD without clobbering the previous word.
-        start = max(cursor + 1 if cursor else 0, int(w["start"] * FRAME_RATE_HZ))
+        start = max(cursor + 1 if cursor else 0, int(onset))
         if start >= num_frames:
             break
         if start - 1 >= 0 and stream[start - 1] == cfg.text_pad_id:
@@ -116,6 +137,84 @@ def align_timestamps(
         stream[start:start + n] = ids[:n]
         cursor = start + n
     return stream
+
+
+def align_timestamps(
+    words: list[dict], num_frames: int, tokenizer, cfg: TextTokCfg
+) -> np.ndarray:
+    """words: [{"word": str, "start": sec, "end": sec}] (forced-aligner output)."""
+    return place_words_at_frames(
+        [(w["word"], int(w["start"] * FRAME_RATE_HZ)) for w in words],
+        num_frames, tokenizer, cfg,
+    )
+
+
+# ---------------- SeqKD retokenization (teacher vocab → student vocab) ----------------
+
+# Moshi's text stream is Helium/SentencePiece (text_card=32000,
+# existing_text_padding_id=3 -- moshi/models/loaders.py). The student is Qwen3.
+# RISKS_AND_DIAGNOSTICS.md §7.2: logit-level KD on text is impossible across
+# different tokenizers, so the teacher's text is decoded and re-tokenized (SeqKD).
+MOSHI_TEXT_TOKENIZER = "kmhf/hf-moshiko"   # same repo the Mimi weights come from
+MOSHI_TEXT_PAD_ID = 3                      # <pad> in the 32k SentencePiece vocab
+_SP_WORD_PREFIX = "▁"                 # SentencePiece word-boundary marker
+
+
+def words_from_frame_stream(
+    stream: np.ndarray, tokenizer, pad_id: int
+) -> list[tuple[str, int]]:
+    """Frame-aligned source-vocab stream → [(word, onset_frame)].
+
+    Groups consecutive non-PAD tokens into words on the SentencePiece word
+    boundary. The onset frame is the frame of a word's *first* token, which is
+    what carries the turn-taking timing we are distilling -- so it is preserved
+    exactly, and only the sub-word tokenization is allowed to change.
+    """
+    words: list[tuple[str, int]] = []
+    cur_ids: list[int] = []
+    cur_start: int | None = None
+
+    def flush():
+        nonlocal cur_ids, cur_start
+        if cur_ids and cur_start is not None:
+            text = tokenizer.decode(cur_ids).strip()
+            if text:
+                words.append((text, cur_start))
+        cur_ids, cur_start = [], None
+
+    for t, raw in enumerate(np.asarray(stream).tolist()):
+        tid = int(raw)
+        if tid == pad_id or tid < 0:
+            continue
+        piece = tokenizer.convert_ids_to_tokens(tid)
+        if piece is None:
+            continue
+        # Specials other than PAD (unk/bos/eos) carry no transcript content.
+        if piece.startswith("<") and piece.endswith(">"):
+            continue
+        if piece.startswith(_SP_WORD_PREFIX) and cur_ids:
+            flush()
+        if cur_start is None:
+            cur_start = t
+        cur_ids.append(tid)
+    flush()
+    return words
+
+
+def retokenize_frame_aligned(
+    stream: np.ndarray, src_tokenizer, src_pad_id: int, tgt_tokenizer, cfg: TextTokCfg
+) -> np.ndarray:
+    """Frame-aligned teacher-vocab stream → frame-aligned student-vocab stream.
+
+    Length is preserved (both are (T,) at FRAME_RATE_HZ). Word onsets are
+    preserved; token counts inside a word are not, and a word whose student
+    tokenization no longer fits before the next onset is truncated exactly as in
+    align_uniform -- timing is the signal being distilled, sub-word identity is not.
+    """
+    assert cfg.text_pad_id is not None and cfg.text_epad_id is not None, \
+        "text_pad_id/text_epad_id are unset (configs/data/text_tok.yaml)"
+    words = words_from_frame_stream(stream, src_tokenizer, src_pad_id)
+    return place_words_at_frames(words, len(stream), tgt_tokenizer, cfg)
 
 
 class TextAlignMixin:

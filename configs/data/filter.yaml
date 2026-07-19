@@ -1,0 +1,36 @@
+# FilterConfig (data_pipeline/datasets/en_kd_dataset.py).
+#
+# Self-talk collapses in characteristic ways; each threshold below targets one.
+# Re-run the filter alone after editing:
+#   python -m data_pipeline.datasets en_kd --stage filter \
+#       --filter-config configs/data/filter.yaml
+# It rewrites accepted.json + filter_report.json without regenerating anything,
+# and the report's per-reason counts are what you tune against.
+
+# MIRROR of configs/tokens.yaml text_pad_id. This is the STUDENT's PAD.
+# The generator emits Helium ids (PAD=3); `ingest_ab_selfplay` retokenizes into
+# the student vocabulary before the filter ever runs (SeqKD, RISKS 7.2), so by
+# the time check_stream() sees a stream it is Qwen3-space. Putting 3 here would
+# score every dialogue as never_silent and reject the whole corpus.
+text_pad_id: 151669
+
+min_frames: 250          # < 20 s at 12.5 Hz: too short to contain a turn exchange
+
+# Text-stream PAD ratio, per speaker. Catches the two symmetric degenerate modes.
+silence_ratio_min: 0.15  # below => this side never stops talking
+silence_ratio_max: 0.97  # above  => this side went permanently silent
+
+# Audio-token loops, measured on the semantic codebook (0) only -- that is where
+# content lives, and an acoustic-level repeat is not by itself a collapse.
+# Unique n-grams / total: ~1 for normal speech, ~1/period for a loop. A
+# "most-frequent n-gram share" test would miss it, because a period-p loop
+# produces p rotated variants that dilute the share to 1/p.
+audio_ngram: 8
+audio_diversity_min: 0.2
+
+# Sentence-level repetition, over non-PAD text tokens.
+# NOTE: retokenization changes what an n-gram is -- Qwen3 splits a word into a
+# different number of subwords than Helium did, so this threshold is calibrated
+# against the post-ingest stream, not the raw capture.
+text_ngram: 4
+text_diversity_min: 0.3

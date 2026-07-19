@@ -6,7 +6,6 @@ Folder layout — one file per concrete dataset, named after it:
                                + AudioSourceDataset (audio-source family base) + RawEntry
   mixins.py                    overlapping functionality (MimiEncoder / TextAlign / NpzPairIO)
   kss_dataset.py               KSSDataset
-  css10_ko_dataset.py          CSS10KoDataset
   common_voice_ko_dataset.py   CommonVoiceKoDataset
   zeroth_ko_dataset.py         ZerothKoDataset
   en_kd_dataset.py             EnKDDialogueDataset (self-talk generation + quality filter)
@@ -154,7 +153,7 @@ class AudioSourceDataset(MimiEncoderMixin, TextAlignMixin, NpzPairIOMixin, BaseD
     @classmethod
     def from_cli(cls, args) -> "AudioSourceDataset":
         return cls(
-            out_dir=args.out_dir,
+            out_dir=args.out_dir or "data/tokenized",
             root=args.root,
             text_cfg=TextTokCfg.from_yaml(args.text_config),
             device=args.device,

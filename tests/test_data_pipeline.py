@@ -207,3 +207,108 @@ def test_mimi_encoder_actually_encodes():
         "silence and a 440 Hz tone encoded to identical codes -- the encoder is "
         "not actually running"
     )
+
+
+# ------------------------------------------------- sharded / chunked writing
+#
+# `write()` used to buffer every row of every split in a Python list and call
+# Dataset.from_list once, while Sample.to_row emitted Python lists -- an 18x
+# blowup over the packed dtype (a 2-byte int16 becomes a 28-byte Python int,
+# which pyarrow then re-packs into 2 bytes). Fine for the 150 rows on disk,
+# ~430 GB for the ~10k en_kd dialogues section 4.7's exposure budget needs.
+# These pin the streaming path, which nothing else exercises: the fixtures are
+# all far below ROWS_PER_CHUNK, so the flush never fires in the other tests.
+
+
+def test_to_row_emits_arrays_not_python_lists():
+    """The 18x memory blowup, pinned at the source."""
+    row = _sample("spk").to_row()
+    for key in ("codes_a", "text_tokens_a", "teacher_topk_val_a"):
+        assert isinstance(row[key], np.ndarray), (
+            f"{key} came back as {type(row[key]).__name__}; a Python list here "
+            f"costs ~18x and pyarrow immediately undoes it"
+        )
+    assert row["codes_a"].dtype == np.int16
+    assert row["teacher_topk_val_a"].size == 0, "absent tensors must stay empty"
+
+
+def test_write_chunks_without_changing_the_result(tmp_path, monkeypatch):
+    """Many small chunks must produce exactly what one big write would."""
+    from datasets import load_from_disk
+
+    from data_pipeline import prepare_dataset as pd_mod
+
+    n = 25
+    rows = [_sample(f"spk{i}", uid=f"uid{i:03d}").to_row() for i in range(n)]
+
+    def run(chunk_size: int, out: Path) -> dict:
+        monkeypatch.setattr(pd_mod, "ROWS_PER_CHUNK", chunk_size)
+        return pd_mod.write(iter(list(rows)), out, "ko_tts", holdout_ratio=0.0)
+
+    one = tmp_path / "one"
+    many = tmp_path / "many"
+    counts_one = run(10_000, one)      # single chunk: the old behaviour
+    counts_many = run(3, many)         # forces 9 flushes
+
+    assert counts_one == counts_many == {"train": n}
+
+    a = load_from_disk(str(one / "ko_tts" / "train"))
+    b = load_from_disk(str(many / "ko_tts" / "train"))
+    assert a.column_names == b.column_names
+    assert sorted(a["sample_uid"]) == sorted(b["sample_uid"]) == sorted(
+        r["sample_uid"] for r in rows
+    )
+    by_uid = {r["sample_uid"]: r for r in b}
+    for row in a:
+        other = by_uid[row["sample_uid"]]
+        assert row["codes_a"] == other["codes_a"]
+        assert row["speaker"] == other["speaker"]
+        assert row["num_frames"] == other["num_frames"]
+
+
+def test_write_removes_its_chunk_scratch(tmp_path, monkeypatch):
+    """The chunks live under the destination; leaving them doubles corpus size
+    and makes `_chunks` look like a prepared group to anything globbing the root."""
+    from data_pipeline import prepare_dataset as pd_mod
+
+    monkeypatch.setattr(pd_mod, "ROWS_PER_CHUNK", 2)
+    rows = [_sample("s", uid=f"u{i}").to_row() for i in range(7)]
+    pd_mod.write(iter(rows), tmp_path, "ko_tts", holdout_ratio=0.0)
+
+    assert not (tmp_path / "ko_tts" / "_chunks").exists()
+    assert sorted(p.name for p in (tmp_path / "ko_tts").iterdir()) == ["train"]
+
+
+def test_write_still_splits_train_and_probe_in_one_pass(tmp_path, monkeypatch):
+    """`rows` is a generator over iter_samples(); a second pass would re-read
+    every npz, so the split has to happen while streaming."""
+    from data_pipeline import prepare_dataset as pd_mod
+
+    monkeypatch.setattr(pd_mod, "ROWS_PER_CHUNK", 2)
+    rows = [_sample("s", uid=f"u{i:03d}").to_row() for i in range(40)]
+    consumed = 0
+
+    def counting():
+        nonlocal consumed
+        for r in rows:
+            consumed += 1
+            yield r
+
+    counts = pd_mod.write(counting(), tmp_path, "ko_tts", holdout_ratio=0.5)
+
+    assert consumed == len(rows), "rows were iterated more than once"
+    assert set(counts) <= {"train", "probe"}
+    assert sum(counts.values()) == len(rows)
+    assert counts.get("probe", 0) > 0 and counts.get("train", 0) > 0
+
+
+def test_rows_per_chunk_stays_small_enough_to_bound_memory():
+    """ROWS_PER_CHUNK *is* the memory bound -- raising it far enough restores the
+    unbounded behaviour with no test failing, because the correctness tests set
+    it explicitly. en_kd sizes it: ~3 MB of teacher top-k per dialogue at
+    K=8/T=1500/topk=32, so 512 rows is ~1.5 GB of buffer before a flush."""
+    from data_pipeline.prepare_dataset import ROWS_PER_CHUNK
+
+    assert 1 <= ROWS_PER_CHUNK <= 4096, (
+        f"ROWS_PER_CHUNK={ROWS_PER_CHUNK} no longer bounds the write buffer"
+    )

@@ -47,7 +47,7 @@ class TextAnchorDataset(BaseDataset):
         return cls(
             jsonl=args.jsonl,
             tokenizer_name=TextTokCfg.from_yaml(args.text_config).tokenizer_name,
-            out_dir=args.out_dir,
+            out_dir=args.out_dir or "data/raw",
         )
 
     def build(self, limit: int | None = None) -> dict:

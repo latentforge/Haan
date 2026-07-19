@@ -22,7 +22,7 @@ from conftest import make_solo_sample  # tests/ is on sys.path under pytest
 from data_pipeline.datasets import REGISTRY, BaseDataset
 from data_pipeline.prepare_dataset import builders_for_group
 from data_pipeline.schema import SCHEMA_VERSION
-from training.data import prepare as P
+from training.datasets import prepare as P
 
 FAKE_GROUP = "fake_group"
 
@@ -57,7 +57,7 @@ class FakeBuilderA(_FakeBuilderBase):
 
 
 class FakeBuilderB(_FakeBuilderBase):
-    """Second builder in the same group -- the N:1 case (kss + css10_ko -> ko_tts)."""
+    """Second builder in the same group -- the N:1 case (kss + zeroth_ko -> ko_tts)."""
 
     name = "fake_b"
 
@@ -90,7 +90,7 @@ def test_group_is_discovered_from_registry_not_hardcoded():
 
     # the real N:1 case the plan calls out
     assert sorted(b.name for b in builders_for_group("ko_tts")) == [
-        "common_voice_ko", "css10_ko", "kss", "zeroth_ko",
+        "common_voice_ko", "kss", "zeroth_ko",
     ]
 
 
@@ -198,7 +198,7 @@ def test_44_schema_version_mismatch_rebuilds(root: Path, tmp_path: Path):
 
 
 def test_45_heavy_group_refused_in_multirank_job():
-    from training.data.loader import HEAVY_GROUPS, _assert_can_build
+    from training.datasets.loader import HEAVY_GROUPS, _assert_can_build
 
     assert {"en_kd", "en_solo", "ko_tts"} <= set(HEAVY_GROUPS)
 
@@ -206,12 +206,12 @@ def test_45_heavy_group_refused_in_multirank_job():
         with pytest.raises(RuntimeError) as ei:
             _assert_can_build("if_missing", group, world_size=4)
         msg = str(ei.value)
-        assert f"python -m training.data.prepare --group {group}" in msg
+        assert f"python -m training.datasets.prepare --group {group}" in msg
         assert "4-rank" in msg
 
 
 def test_45b_rank_guard_allows_the_cases_it_should():
-    from training.data.loader import _assert_can_build
+    from training.datasets.loader import _assert_can_build
 
     _assert_can_build("never", "en_kd", world_size=4)        # never build in-job
     _assert_can_build("if_missing", "en_kd", world_size=1)   # single process
@@ -270,7 +270,7 @@ def test_en_solo_requires_en_kd_first(root: Path):
         P.ensure_prepared("en_solo", root=root)
     msg = str(ei.value)
     assert "en_kd" in msg
-    assert "python -m training.data.prepare --group en_kd" in msg
+    assert "python -m training.datasets.prepare --group en_kd" in msg
 
 
 def test_ordered_groups_puts_dependencies_first():
@@ -279,19 +279,35 @@ def test_ordered_groups_puts_dependencies_first():
     assert P.ordered_groups(["ko_tts"]) == ["ko_tts"]
 
 
-# ------------------------------------------------------------ en_kd stub
+# --------------------------------------------------- en_kd has no in-repo source
 
 
-def test_en_kd_failure_names_both_paths(root: Path, tmp_path: Path, monkeypatch):
+def test_en_kd_failure_points_at_the_ingest_command(root: Path, tmp_path: Path,
+                                                    monkeypatch):
+    """en_kd dialogues come from the teacher, not from this package, so the only
+    actionable instruction is the ingest command. It used to name two paths, one
+    of which was implementing an in-repo generator; that generator is gone."""
     monkeypatch.chdir(tmp_path)            # no data/generated/en_kd here
     with pytest.raises(RuntimeError) as ei:
         P.ensure_prepared("en_kd", root=root)
     msg = str(ei.value)
-    assert "MoshiSelfTalkEngine" in msg
     assert "python -m data_pipeline.datasets en_kd --stage ingest --root" in msg
-    assert "data_pipeline/datasets/en_kd_dataset.py" in msg
+    assert "--text-config" in msg, "ingest needs text_cfg for SeqKD; say so"
+    assert "MoshiSelfTalkEngine" not in msg, "the in-repo generator no longer exists"
     # and it must not have left a group behind
     assert not P.is_prepared(root, "en_kd")
+
+
+def test_en_kd_builder_has_no_generation_stage():
+    """Generation is teacher inference, not corpus preparation. build() exists
+    only to satisfy the BaseDataset contract and must fail with a pointer rather
+    than half-implement a generator."""
+    from data_pipeline.datasets import REGISTRY
+
+    cls = REGISTRY["en_kd"]
+    assert not hasattr(cls, "_generate")
+    with pytest.raises(NotImplementedError, match="--stage ingest"):
+        cls().build()
 
 
 def test_not_implemented_is_translated(root: Path, monkeypatch):
@@ -348,7 +364,7 @@ def test_cli_reports_guardrail_failures_without_a_traceback(root: Path, capsys):
     assert P.main(["--group", "en_solo", "--root", str(root)]) == 1
     err = capsys.readouterr().err
     assert "cannot prepare 'en_solo'" in err
-    assert "python -m training.data.prepare --group en_kd" in err
+    assert "python -m training.datasets.prepare --group en_kd" in err
 
 
 def test_cli_all_covers_every_registered_group(root: Path, monkeypatch):

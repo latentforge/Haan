@@ -176,3 +176,95 @@ def test_timestamps_respects_frame_bounds():
     ws = [{"word": "aa", "start": 0.0, "end": 0.2}, {"word": "bb", "start": 9.0, "end": 9.5}]
     s = align_timestamps(ws, 10, _FakeTok(), CFG)
     assert len(s) == 10
+
+
+# ------------------------------------------------- SeqKD retokenization (7.2)
+#
+# en_kd text arrives in the teacher's Helium vocabulary (PAD=3), and every
+# downstream consumer compares against the *student's* PAD. Passing the teacher
+# ids through fails silently: PAD never matches, so the quality filter scores
+# every dialogue `never_silent` and rejects the entire corpus, en_solo finds zero
+# solo windows, and the collator's PAD down-weighting never fires.
+
+SRC_PAD = 3
+
+
+WORD_INITIAL = 10_000   # id offset marking a word-initial piece (the real '▁')
+
+
+class _FakeSrcTok:
+    """SentencePiece-shaped source tokenizer: one id per character.
+
+    Word-initial characters get +WORD_INITIAL, mirroring the real '▁' prefix
+    without needing a 32k vocab. Ids stay positive: negative ids are the absent
+    marker the real streams use, and the implementation skips them.
+    """
+
+    def convert_ids_to_tokens(self, tid):
+        return "▁" + chr(tid - WORD_INITIAL) if tid >= WORD_INITIAL else chr(tid)
+
+    def decode(self, ids):
+        return "".join(chr(i - WORD_INITIAL if i >= WORD_INITIAL else i) for i in ids)
+
+
+def src_stream(words_at: list[tuple[str, int]], num_frames: int) -> np.ndarray:
+    """Build a teacher-vocab stream with each word's chars at consecutive frames."""
+    s = np.full(num_frames, SRC_PAD, dtype=np.int32)
+    for word, onset in words_at:
+        ids = [ord(word[0]) + WORD_INITIAL] + [ord(c) for c in word[1:]]
+        s[onset:onset + len(ids)] = ids
+    return s
+
+
+def test_retokenize_preserves_length_and_word_onsets():
+    from data_pipeline.datasets.mixins import retokenize_frame_aligned
+
+    placed = [("abc", 5), ("de", 20)]
+    s = src_stream(placed, 40)
+    out = retokenize_frame_aligned(s, _FakeSrcTok(), SRC_PAD, _FakeTok(), CFG)
+
+    assert len(out) == 40
+    for word, onset in placed:
+        assert out[onset:onset + len(word)].tolist() == [ord(c) for c in word]
+        assert out[onset - 1] == EPAD
+
+
+def test_retokenize_maps_teacher_pad_onto_student_pad():
+    """The bug this whole path exists for: without it pad_ratio is 0.0 and the
+    quality filter rejects every dialogue as `never_silent`."""
+    from data_pipeline.datasets.mixins import retokenize_frame_aligned
+
+    s = src_stream([("hi", 4), ("there", 12)], 40)
+    out = retokenize_frame_aligned(s, _FakeSrcTok(), SRC_PAD, _FakeTok(), CFG)
+
+    assert (out == SRC_PAD).sum() == 0, "teacher PAD id leaked into the student stream"
+    assert 0.15 < float((out == PAD).mean()) < 0.97, "filter would reject this row"
+
+
+def test_retokenize_keeps_a_silent_speaker_silent():
+    """A collapsed speaker must stay all-PAD, or `always_silent` stops detecting it."""
+    from data_pipeline.datasets.mixins import retokenize_frame_aligned
+
+    out = retokenize_frame_aligned(
+        np.full(30, SRC_PAD, dtype=np.int32), _FakeSrcTok(), SRC_PAD, _FakeTok(), CFG
+    )
+    assert (out == PAD).all()
+
+
+def test_word_grouping_splits_on_word_prefix_not_on_frame_gaps():
+    """Multi-token words must survive as one word: splitting them would move the
+    later fragments' onsets and fabricate EPAD triggers mid-word."""
+    from data_pipeline.datasets.mixins import words_from_frame_stream
+
+    s = src_stream([("abc", 5), ("de", 20)], 40)
+    assert words_from_frame_stream(s, _FakeSrcTok(), SRC_PAD) == [("abc", 5), ("de", 20)]
+
+
+def test_place_words_at_frames_has_no_float_roundtrip_drift():
+    """align_timestamps goes through seconds; frame 7 is 6.999... on the way back.
+    The frame-indexed entry point must not inherit that."""
+    from data_pipeline.datasets.mixins import place_words_at_frames
+
+    for f in range(1, 30):
+        s = place_words_at_frames([("a", f)], 40, _FakeTok(), CFG)
+        assert s[f] == ord("a"), f"word landed off frame {f}"

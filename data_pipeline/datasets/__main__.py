@@ -5,11 +5,12 @@ Examples:
   python -m data_pipeline.datasets kss --root data/raw/kss --out-dir data/tokenized
   python -m data_pipeline.datasets zeroth_ko --root . --out-dir data/tokenized --limit 100
 
-  # en_kd: self-talk generation + quality filter
-  python -m data_pipeline.datasets en_kd --out-dir data/generated \
-      --gen-config configs/data/generation.yaml --filter-config configs/data/filter.yaml
-  python -m data_pipeline.datasets en_kd --out-dir data/generated \
-      --filter-config configs/data/filter.yaml --stage filter    # threshold tuning: filter only
+  # en_kd: ingest teacher self-play dialogues, then filter. Generation itself is
+  # NOT done here -- run the Moshi self-play harness to get dialogue_*.npz first.
+  python -m data_pipeline.datasets en_kd --stage ingest --root <dialogues_dir> \
+      --text-config configs/data/text_tok.yaml --filter-config configs/data/filter.yaml
+  python -m data_pipeline.datasets en_kd --stage filter \
+      --filter-config configs/data/filter.yaml            # threshold tuning: filter only
 
   # en_solo: crops from en_kd artifacts (--root = en_kd artifact directory)
   python -m data_pipeline.datasets en_solo --root data/generated/en_kd \
@@ -35,9 +36,12 @@ def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("name", nargs="?", help=f"dataset name: {sorted(REGISTRY)}")
     p.add_argument("--root", default=".", help="raw data path (for en_solo: en_kd artifact path)")
-    p.add_argument("--out-dir", default="data/tokenized", help="artifact root (actual location: <out-dir>/<name>/)")
+    # No default: each builder declares its own in __init__ (tokenized / generated /
+    # data), and from_cli falls back to it. A shared default here would silently
+    # override those -- e.g. seed_prompts landing in data/tokenized/seed_prompts/
+    # while its consumer reads data/seed_prompts/, with no error either side.
+    p.add_argument("--out-dir", default=None, help="artifact root (actual location: <out-dir>/<name>/)")
     p.add_argument("--text-config", default="configs/data/text_tok.yaml")
-    p.add_argument("--gen-config", default=None, help="en_kd generation config yaml")
     p.add_argument("--filter-config", default=None, help="en_kd quality-filter config yaml")
     p.add_argument("--jsonl", default="data/raw/text_anchor.jsonl", help="text_anchor input")
     p.add_argument("--min-sec", type=float, default=6.0, help="minimum en_solo crop length")

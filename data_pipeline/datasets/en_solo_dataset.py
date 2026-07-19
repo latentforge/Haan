@@ -74,7 +74,7 @@ class EnSoloDataset(NpzPairIOMixin, BaseDataset):
     @classmethod
     def from_cli(cls, args) -> "EnSoloDataset":
         return cls(
-            out_dir=args.out_dir,
+            out_dir=args.out_dir or "data/generated",
             kd_dir=args.root,
             text_cfg=TextTokCfg.from_yaml(args.text_config),
             min_sec=args.min_sec,

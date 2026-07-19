@@ -1,14 +1,26 @@
-"""Generated family: dual-Moshi self-talk generation + quality filter → en_kd samples.
+"""Generated family: ingest dual-Moshi self-talk dialogues → quality filter → en_kd samples.
 
-Core idea (slide 15):
-  Moshi A and B share weights, so the model is not loaded twice.
-  Run one model with batch=2N, with slots [0:N]=role A and [N:2N]=role B, and every
-  frame cross-feed A[i]'s output audio tokens as B[i]'s "other stream" input, and
-  vice versa. VRAM holds one 7B copy + 2N KV caches.
+**Generation is out of scope for this package.** en_kd dialogues are produced by
+running the teacher (a Moshi self-play harness, currently the Colab notebook
+`kmoshi_ab_selfplay_v2.ipynb`), which is teacher *inference*, not corpus
+preparation. Every other builder here parses an existing corpus; this one used to
+also create it, and the mismatch cost real time — the in-repo generator was a
+`NotImplementedError` stub whose docstring blamed an unfinished "team fork
+streaming interface", and that turned out not to exist as a blocker at all
+(`moshi.models.LMGen` has supported batched streaming and per-item exec masks all
+along; see plan section 9.5). This module's contract is now the narrow one:
 
-Dumped per frame:
+    dialogue_*.npz + .meta.json  ->  filtered, retokenized en_kd Samples
+
+How the dialogues are made, for reading the artifacts:
+  Moshi A and B share weights, so the model is not loaded twice. One LMGen runs at
+  batch 2 with item 0 = A and item 1 = B, and every frame each item's own-stream
+  audio tokens are fed as the other's "other stream" input. Cross-feed is at token
+  level (they are already Mimi tokens), so there is no decode/re-encode loss.
+
+Per frame the harness dumps:
   - each role's own-stream audio codes (sampled hard tokens)
-  - each role's inner-monologue text tokens (come frame-aligned for free)
+  - each role's inner-monologue text tokens, in the **teacher's** Helium vocabulary
   - top-k (val, idx) of the raw logits right before sampling — KD soft labels,
     no temperature applied
 
@@ -18,13 +30,6 @@ Quality filter — typical self-talk collapse modes and how they are detected:
   3) same sentence repeated → n-gram duplication rate over non-PAD text tokens
   All thresholds are config-injected. The pass rate is fed back into the
   generation hyperparameters.
-
-Integration point (marked TODO):
-  moshi.models.LMGen is an interface for single-dialogue streaming, so batched
-  cross-feed requires either extending LMGen.step() to batches or calling the inner
-  lm (transformer) forward directly. MoshiSelfTalkEngine is that adapter boundary —
-  once the team fork's PersonaplexForConditionalGeneration streaming interface is
-  finalized, only this class needs replacing.
 """
 
 from __future__ import annotations
@@ -39,29 +44,17 @@ from typing import Iterator
 import numpy as np
 import yaml
 
-from ..schema import NUM_CODEBOOKS, Sample
+from ..schema import Sample
 from .base import BaseDataset
+from .mixins import (
+    MOSHI_TEXT_PAD_ID,
+    MOSHI_TEXT_TOKENIZER,
+    TextTokCfg,
+    retokenize_frame_aligned,
+)
 
 
 # ---------------- configs ----------------
-
-@dataclass
-class GenConfig:
-    n_dialogues: int = 1000
-    batch_pairs: int = 8            # N (concurrent dialogue pairs) → model batch is 2N
-    max_frames: int = 1500          # 120 s at 12.5 Hz
-    topk_dump: int = 32
-    gen_temperature: float = 0.8
-    gen_top_k: int = 250
-    seed: int = 0
-    seed_prompt_dir: str = "data/seed_prompts"   # SeedPromptDataset output
-    device: str = "cuda"
-
-    @classmethod
-    def from_yaml(cls, path: str) -> "GenConfig":
-        with open(path) as f:
-            return cls(**yaml.safe_load(f))
-
 
 @dataclass
 class FilterConfig:
@@ -84,35 +77,6 @@ class FilterConfig:
     def from_yaml(cls, path: str) -> "FilterConfig":
         with open(path) as f:
             return cls(**yaml.safe_load(f))
-
-
-# ---------------- generation engine ----------------
-
-class MoshiSelfTalkEngine:
-    """Batched cross-feed adapter over Moshi streaming generation.
-
-    Responsibilities:
-      * reset(batch): initialize KV cache / streaming state
-      * prime(seed_audio_codes): prime the first M frames with external audio
-        (prevents mode collapse)
-      * step(other_codes) -> (self_codes, text_tokens, topk_val, topk_idx)
-          other_codes: (B, K) the other stream fed in this frame
-          self_codes:  (B, K) own stream generated this frame
-          topk_*:      (B, K, topk) raw-logit top-k
-    """
-
-    def __init__(self, cfg: GenConfig):
-        self.cfg = cfg
-        # TODO(integration): temporarily use the kyutai inference code until the team fork is finalized
-        # from moshi.models import loaders
-        # ckpt = loaders.CheckpointInfo.from_hf_repo("kyutai/moshiko-pytorch-bf16")
-        # self.mimi = ckpt.get_mimi(device=cfg.device)
-        # self.lm = ckpt.get_moshi(device=cfg.device)
-        raise NotImplementedError("Connect once the team fork's streaming interface is finalized")
-
-    def reset(self, batch: int) -> None: ...
-    def prime(self, seed_audio_codes) -> None: ...
-    def step(self, other_codes): ...
 
 
 # ---------------- quality filter (pure functions) ----------------
@@ -165,114 +129,63 @@ def check_dialogue(sample_npz: dict, cfg: FilterConfig) -> tuple[bool, dict]:
 # ---------------- dataset ----------------
 
 class EnKDDialogueDataset(BaseDataset):
-    """en_kd: self-talk generation (build) → quality filter (filter) → Sample (iter_samples)."""
+    """en_kd: ingest teacher self-play dialogues → quality filter → Sample. No generation."""
 
     name = "en_kd"
     source = "en_kd"
     lang = "en"
     sample_type = "en_kd"
 
+    # Teacher-side text vocabulary. The generator emits Helium/SentencePiece ids;
+    # everything downstream (filter, en_solo, collator, loss weights) assumes the
+    # student vocabulary, so ingest retokenizes. See mixins.retokenize_frame_aligned.
+    src_tokenizer_name = MOSHI_TEXT_TOKENIZER
+    src_pad_id = MOSHI_TEXT_PAD_ID
+
     def __init__(
         self,
         out_dir: str | Path = "data/generated",
-        gen_cfg: GenConfig | None = None,        # needed only for build
         filter_cfg: FilterConfig | None = None,  # needed only for filter
+        text_cfg: TextTokCfg | None = None,      # needed only for ingest (SeqKD)
     ):
         super().__init__(out_dir)
-        self.gen_cfg = gen_cfg
         self.filter_cfg = filter_cfg
+        self.text_cfg = text_cfg
+
+    def _tokenizers(self):
+        """(source, target) text tokenizers, loaded once."""
+        pair = getattr(self, "_tok_pair", None)
+        if pair is None:
+            from transformers import AutoTokenizer
+            pair = self._tok_pair = (
+                AutoTokenizer.from_pretrained(self.src_tokenizer_name),
+                AutoTokenizer.from_pretrained(self.text_cfg.tokenizer_name),
+            )
+        return pair
 
     @classmethod
     def from_cli(cls, args) -> "EnKDDialogueDataset":
         return cls(
-            out_dir=args.out_dir,
-            gen_cfg=GenConfig.from_yaml(args.gen_config) if args.gen_config else None,
+            out_dir=args.out_dir or "data/generated",
             filter_cfg=FilterConfig.from_yaml(args.filter_config) if args.filter_config else None,
+            text_cfg=TextTokCfg.from_yaml(args.text_config) if args.text_config else None,
         )
 
     def build(self, limit: int | None = None) -> dict:
-        """Generate, then run the filter too when a filter config is present."""
-        stats = self._generate(limit)
-        if self.filter_cfg is not None:
-            stats["filter"] = self.filter()
-        return stats
+        """No build stage: en_kd artifacts come from the teacher, not from here.
 
-    def _generate(self, limit: int | None = None) -> dict:
-        import torch
-
-        cfg = self.gen_cfg
-        assert cfg is not None, "build() requires gen_cfg"
-        torch.manual_seed(cfg.seed)
-        rng = np.random.default_rng(cfg.seed)
-        self.out_dir.mkdir(parents=True, exist_ok=True)
-
-        engine = MoshiSelfTalkEngine(cfg)
-        seed_prompts = sorted(Path(cfg.seed_prompt_dir).glob("*.safetensors"))  # pre-encoded seed codes
-
-        n_dialogues = min(limit, cfg.n_dialogues) if limit else cfg.n_dialogues
-        n_batches = (n_dialogues + cfg.batch_pairs - 1) // cfg.batch_pairs
-        K, N, TOPK = NUM_CODEBOOKS, cfg.batch_pairs, cfg.topk_dump
-
-        with torch.inference_mode():
-            for b in range(n_batches):
-                engine.reset(batch=2 * N)  # [0:N]=A, [N:2N]=B
-
-                prompt = seed_prompts[rng.integers(len(seed_prompts))] if seed_prompts else None
-                prompt_id = prompt.stem if prompt else "none"
-                # TODO: load prompt → engine.prime(...)
-
-                # buffers: (2N, K, T), (2N, T), (2N, K, T, topk)
-                codes = torch.zeros(2 * N, K, cfg.max_frames, dtype=torch.int16)
-                text = torch.zeros(2 * N, cfg.max_frames, dtype=torch.int32)
-                tk_val = torch.zeros(2 * N, K, cfg.max_frames, TOPK, dtype=torch.float16)
-                tk_idx = torch.zeros(2 * N, K, cfg.max_frames, TOPK, dtype=torch.int16)
-
-                # other-stream input at t=0: silence (assumes the engine provides silence codes)
-                prev = codes[:, :, 0].clone()
-
-                for t in range(cfg.max_frames):
-                    # cross-feed: A hears B's previous output, B hears A's previous output
-                    other = torch.cat([prev[N:], prev[:N]], dim=0)
-                    self_codes, text_t, val_t, idx_t = engine.step(other.to(cfg.device))
-                    codes[:, :, t] = self_codes.cpu()
-                    text[:, t] = text_t.cpu()
-                    tk_val[:, :, t] = val_t.cpu().to(torch.float16)
-                    tk_idx[:, :, t] = idx_t.cpu().to(torch.int16)
-                    prev = self_codes.cpu()
-
-                # serialize per pair as Sample → jsonl+npz (prepare_dataset converts to Arrow)
-                for i in range(N):
-                    meta = {
-                        "seed": cfg.seed * 100_000 + b * N + i,
-                        "gen_temperature": cfg.gen_temperature,
-                        "gen_top_k": cfg.gen_top_k,
-                        "seed_prompt_id": prompt_id,
-                    }
-                    s = Sample(
-                        sample_type=self.sample_type,
-                        lang=self.lang,
-                        codes_a=codes[i].numpy(),
-                        codes_b=codes[N + i].numpy(),
-                        text_tokens_a=text[i].numpy(),
-                        text_tokens_b=text[N + i].numpy(),
-                        teacher_topk_val_a=tk_val[i].numpy(),
-                        teacher_topk_idx_a=tk_idx[i].numpy(),
-                        teacher_topk_val_b=tk_val[N + i].numpy(),
-                        teacher_topk_idx_b=tk_idx[N + i].numpy(),
-                        gen_meta=meta,
-                        sample_uid=self._uid(cfg.seed, b * N + i, prompt_id),
-                    )
-                    np.savez_compressed(self.out_dir / f"{s.sample_uid}.npz", **{
-                        k: v for k, v in s.__dict__.items()
-                        if isinstance(v, np.ndarray)
-                    })
-                    with open(self.out_dir / f"{s.sample_uid}.json", "w") as f:
-                        json.dump({"sample_type": s.sample_type, "lang": s.lang,
-                                   "gen_meta": meta, "sample_uid": s.sample_uid}, f)
-
-                print(f"[{self.name}] batch {b + 1}/{n_batches} done → {self.out_dir}")
-
-        return {"n_dialogues": n_dialogues}
+        Kept to satisfy the BaseDataset contract, and to fail with a pointer
+        rather than silently producing nothing. `ensure_prepared` never reaches
+        this -- build_group() goes straight to iter_samples() -- so only the CLI
+        `--stage build` lands here.
+        """
+        raise NotImplementedError(
+            "en_kd is not generated in-repo. Run the Moshi self-play harness "
+            "(kmoshi_ab_selfplay_v2.ipynb) to produce dialogue_*.npz + "
+            ".meta.json, then ingest them:\n"
+            "    python -m data_pipeline.datasets en_kd --stage ingest "
+            "--root <dialogues_dir> --text-config configs/data/text_tok.yaml"
+        )
 
     def ingest_ab_selfplay(self, src_dir: str | Path) -> dict:
         """Convert Colab ab_selfplay outputs (dialogue_*.npz + .meta.json) into
@@ -289,7 +202,16 @@ class EnKDDialogueDataset(BaseDataset):
 
         A and B have different lengths (B starts at the seed handoff), so both
         are cropped to B's active window — the seed intro is not dialogue.
+
+        Text is retokenized here (SeqKD, RISKS §7.2): the capture is in the
+        teacher's Helium vocabulary and every downstream consumer — the quality
+        filter, en_solo's activity mask, the collator's PAD/EPAD loss weights —
+        compares against the *student's* PAD id. Passing the teacher ids through
+        fails silently, not loudly: PAD never matches, so the filter scores every
+        dialogue as `never_silent` and rejects the whole corpus.
         """
+        assert self.text_cfg is not None, \
+            "ingest_ab_selfplay() requires text_cfg (SeqKD retokenization)"
         src = Path(src_dir)
         self.out_dir.mkdir(parents=True, exist_ok=True)
         stats = {"ingested": 0, "frames": 0}
@@ -300,7 +222,16 @@ class EnKDDialogueDataset(BaseDataset):
             exec_log = np.asarray(meta["exec_mask_log"], dtype=bool)   # (R, 2)
 
             own = {"a": z["own_audio_tokens_A"], "b": z["own_audio_tokens_B"]}  # (T, K)
-            text = {"a": z["text_tokens_A"], "b": z["text_tokens_B"]}
+            # SeqKD: the capture is in the teacher's Helium vocabulary; retokenize
+            # into the student's before anything downstream reads a PAD id.
+            src_tok, tgt_tok = self._tokenizers()
+            text = {
+                side: retokenize_frame_aligned(
+                    z[f"text_tokens_{side.upper()}"],
+                    src_tok, self.src_pad_id, tgt_tok, self.text_cfg,
+                )
+                for side in ("a", "b")
+            }
             K = own["a"].shape[1]
 
             # --- capture (internal steps) → per-frame teacher top-k ---

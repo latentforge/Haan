@@ -66,7 +66,9 @@ class SeedPromptDataset(MimiEncoderMixin, BaseDataset):
     @classmethod
     def from_cli(cls, args) -> "SeedPromptDataset":
         return cls(
-            out_dir=args.out_dir,
+            # "data" (not data/tokenized): BaseDataset appends <name>, and
+            # GenConfig.seed_prompt_dir reads exactly data/seed_prompts/.
+            out_dir=args.out_dir or "data",
             seed_source=args.seed_source,
             root=args.root,
             seed_sec=args.seed_sec,
