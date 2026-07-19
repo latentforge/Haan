@@ -27,6 +27,7 @@ torch = [
 torchaudio = [
     { index = "pytorch-cu126" },
 ]
+transformers = { git = "https://github.com/latentforge/transformers-moshi.git" }
 
 [tool.uv.extra-build-dependencies]
 flash-attn = [ "torch" ]
