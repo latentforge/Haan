@@ -31,6 +31,22 @@ SAMPLE_RATE = 24_000
 
 SAMPLE_TYPES = ("en_kd", "ko_tts", "text_anchor")
 
+# ---- prepared-artifact schema version ----
+# Bump on ANY change to arrow_features(): added/removed/retyped field, or a change
+# to the flat-store convention. training/data/prepare.py stamps this into each
+# group's _SUCCESS.json sentinel and rebuilds automatically when it no longer
+# matches, so stale prepared data can never be read back through a newer schema.
+# (Planned bump: adding `zone_a_frames` per plan section 3.7.)
+#
+# v2: added `speaker`. Voice-prompt conditioning needs the reference audio for a
+#     ko_tts sample to be *the same speaker's other utterance* -- i.e. another row
+#     of the same dataset -- so no reference codes are stored, but the training
+#     Dataset has to be able to find same-speaker rows. Every dataset already set
+#     RawEntry.speaker and base.py wrote it into the per-sample .json; it was then
+#     dropped at the Arrow boundary. Corpora prepared before this bump have no
+#     speaker column and must be rebuilt rather than read back with an empty one.
+SCHEMA_VERSION = 2
+
 
 def arrow_features() -> Features:
     """Arrow Features used with save_to_disk.
@@ -66,6 +82,11 @@ def arrow_features() -> Features:
             },
             # stable hash for hold-out split (based on source file path or generation seed)
             "sample_uid": Value("string"),
+            # speaker identity, source-local (only comparable within one dataset).
+            # "" when the source genuinely has no notion of a speaker (text_anchor)
+            # or when a row carries two of them (en_kd holds both A and B).
+            # Used to pick a same-speaker row as the voice prompt.
+            "speaker": Value("string"),
         }
     )
 
@@ -86,6 +107,7 @@ class Sample:
     teacher_topk_idx_b: np.ndarray | None = None
     gen_meta: dict = field(default_factory=dict)
     sample_uid: str = ""
+    speaker: str = ""                       # source-local speaker id; "" when unknown
 
     @property
     def num_frames(self) -> int:
@@ -120,6 +142,7 @@ class Sample:
                 "seed_prompt_id": str(self.gen_meta.get("seed_prompt_id", "")),
             },
             "sample_uid": self.sample_uid,
+            "speaker": self.speaker,
         }
 
 
@@ -143,6 +166,7 @@ def row_to_arrays(row: dict) -> dict:
         "text_tokens_b": np.asarray(row["text_tokens_b"], dtype=np.int32),
         "gen_meta": row.get("gen_meta", {}),
         "sample_uid": row.get("sample_uid", ""),
+        "speaker": row.get("speaker", "") or "",
     }
     if topk > 0:
         for side in ("a", "b"):

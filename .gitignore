@@ -230,3 +230,7 @@ trainer_output/
 .omc
 .claude
 .agents
+
+# configs/data holds derived-but-committed artifacts (mimi_silence.json), not
+# corpus output. The generic data/ rule above would swallow it.
+!configs/data/

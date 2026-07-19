@@ -1,0 +1,68 @@
+# Training-time data stack: dataset -> collator -> sampler -> DataLoader.
+#
+# Group names MUST match data_pipeline.datasets `source` attributes and the
+# directory names prepare_dataset writes, because mixing_sampler draws at that
+# granularity. A typo here is a KeyError at build time, which is the intent.
+
+root: data/prepared
+
+dataset:
+  # Generation caps at 1500 frames (120 s); training on all of it with K=8 soft
+  # targets is not memory-viable at a useful batch size.
+  max_frames: 750
+  crop_mode: random        # probe forces `center` regardless
+  max_text_len: 2048
+  # Deterministic A/B index doubling: every dialogue seen in both directions
+  # exactly once per epoch, independent of worker count.
+  double_ab: true
+  debug_validate: false
+
+# Korean ratio ramp. Piecewise-linear rather than staged: a 10%->30% jump lands
+# in the middle of the critical period and would make English degradation
+# unattributable (was it Korean's presence, or the discontinuity?).
+#
+# `ko_asr` is not a corpus. It is the *same* prepared ko_tts rows read a second
+# time with the text delay flipped so text lags the audio -- DATA_STRATEGY 4.2's
+# bidirectional reuse, made a one-line alias by ARCHITECTURE 5.0.2 ("no changes
+# in the loss, architecture, or training data"). See loader.GROUP_ALIASES.
+#
+# The weight is deliberately small and does not ramp with ko_tts: 4.2 classifies
+# the ASR direction as a 보강 수단 -- a supplementary path to expose the listening
+# circuit to Korean content -- not a co-equal track. Shared embeddings + role
+# tokens and a Depth that also generates the user stream already give the user
+# channel gradient, which is what demoted this from "required" to "supplementary".
+# Raising it trades away agent-side TTS steps for transcription steps.
+mix:
+  interp: linear
+  anchors:
+    - {at: 0,     weights: {en_kd: 0.85, en_solo: 0.05, ko_tts: 0.05, ko_asr: 0.02, text_anchor: 0.05}}
+    - {at: 4000,  weights: {en_kd: 0.75, en_solo: 0.10, ko_tts: 0.10, ko_asr: 0.03, text_anchor: 0.05}}
+    - {at: 20000, weights: {en_kd: 0.55, en_solo: 0.10, ko_tts: 0.30, ko_asr: 0.05, text_anchor: 0.05}}
+    - {at: 45000, weights: {en_kd: 0.35, en_solo: 0.10, ko_tts: 0.50, ko_asr: 0.05, text_anchor: 0.05}}
+  constraints:
+    # The text anchor is the only guard against catastrophic forgetting of
+    # Qwen3's multilingual ability; if it silently drops out, Phase 4 is void.
+    text_anchor: {min: 0.03, max: 0.08}
+    require_groups: [en_kd, ko_tts, text_anchor]
+
+sampler:
+  # Frames per rank per micro-batch. T varies 6x (250..1500), so a fixed B would
+  # have to be sized for the worst case and waste ~5x on short batches.
+  token_budget: 6000
+  max_batch: 16
+  bucket_width: 100
+  pool_multiplier: 64
+  steps_per_epoch: 2000
+  grad_accum: 4            # group held constant across the accumulation window
+  recycle: reshuffle       # without replacement: exposure counts differ by <=1
+  max_repeat_factor: 8.0   # warn (never raise) past this; read next to probe gap
+  seed: 1234
+
+dataloader:
+  num_workers: 6
+  prefetch_factor: 2
+  pin_memory: true
+  # Must stay false: persistent workers freeze the dataset's epoch at fork time,
+  # so set_epoch() silently becomes a no-op and every epoch replays epoch-0 crops.
+  persistent_workers: false
+  build: never             # never | if_missing | force

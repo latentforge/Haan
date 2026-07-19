@@ -39,7 +39,7 @@ from typing import Iterator
 
 import numpy as np
 
-from ..schema import SAMPLE_RATE, Sample
+from ..schema import FRAME_RATE_HZ, SAMPLE_RATE, Sample
 from .mixins import MimiEncoderMixin, NpzPairIOMixin, TextAlignMixin, TextTokCfg
 
 REGISTRY: dict[str, type["BaseDataset"]] = {}
@@ -227,6 +227,6 @@ class AudioSourceDataset(MimiEncoderMixin, TextAlignMixin, NpzPairIOMixin, BaseD
             self.save_pair(e.uid, codes, stream, {
                 "path": e.audio_path or "", "text": e.text,
                 "source": self.name, "speaker": e.speaker,
-                "duration": T / 12.5, **e.extra,
+                "duration": T / FRAME_RATE_HZ, **e.extra,
             })
         return len(ok_entries)

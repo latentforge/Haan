@@ -19,6 +19,7 @@ from typing import Iterator
 
 import numpy as np
 
+from ..schema import FRAME_RATE_HZ
 from .base import BaseDataset
 from .mixins import NpzPairIOMixin, TextTokCfg
 
@@ -86,7 +87,7 @@ class EnSoloDataset(NpzPairIOMixin, BaseDataset):
         # None would make every activity mask False → zero crops, silently
         assert pad_id is not None, \
             "text_pad_id is unset (configs/data/text_tok.yaml) - finalize the PAD/EPAD mapping first"
-        min_frames = int(self.min_sec * 12.5)
+        min_frames = int(self.min_sec * FRAME_RATE_HZ)
         self.out_dir.mkdir(parents=True, exist_ok=True)
         accepted = set(json.loads((self.kd_dir / "accepted.json").read_text()))
 
@@ -105,7 +106,17 @@ class EnSoloDataset(NpzPairIOMixin, BaseDataset):
                         f"{uid}-solo-{me}{wi}",
                         data[f"codes_{me}"][:, s:e],
                         data[f"text_tokens_{me}"][s:e],
-                        {"lang": self.lang, "src_dialogue": uid, "frames": int(e - s)},
+                        {
+                            "lang": self.lang, "src_dialogue": uid,
+                            "frames": int(e - s),
+                            # One dialogue stream = one synthetic voice, so every
+                            # crop of stream `me` from dialogue `uid` is the same
+                            # speaker. Conservative: the voice actually comes from
+                            # the seed prompt, which is not in the npz, so the same
+                            # voice reused across dialogues splits into distinct ids
+                            # rather than two voices ever merging into one.
+                            "speaker": f"{uid}:{me}",
+                        },
                     )
                     n_crops += 1
         stats = {"crops": n_crops, "dialogues": len(accepted)}

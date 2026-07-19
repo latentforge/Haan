@@ -406,6 +406,10 @@ class EnKDDialogueDataset(BaseDataset):
                 teacher_topk_val_b=arr["teacher_topk_val_b"],
                 teacher_topk_idx_b=arr["teacher_topk_idx_b"],
                 gen_meta=meta["gen_meta"], sample_uid=uid,
+                # An en_kd row carries BOTH dialogue streams, i.e. two voices, so a
+                # single speaker id cannot describe it. The per-stream identity is
+                # recoverable from en_solo crops instead (speaker="{uid}:{a|b}").
+                speaker="",
             )
 
     @staticmethod

@@ -17,6 +17,7 @@ dependencies = [
     "ipykernel>=7.3.0",
     "jupyter-client>=8.9.1",
     "matplotlib>=3.11.0",
+    "torchaudio>=2.11.0",
 ]
 
 [tool.uv.sources]
@@ -34,3 +35,13 @@ flash-attn = [ "torch" ]
 name = "pytorch-cu126"
 url = "https://download.pytorch.org/whl/cu126"
 explicit = true
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
+
+[tool.pytest.ini_options]
+markers = [
+    "slow: loads a real model or otherwise takes seconds; deselect with -m 'not slow'",
+]

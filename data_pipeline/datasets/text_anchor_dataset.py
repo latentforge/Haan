@@ -65,4 +65,5 @@ class TextAnchorDataset(BaseDataset):
                 codes_a=np.zeros((8, 0), dtype=np.int16),
                 text_tokens_a=np.asarray(ids, dtype=np.int32),
                 sample_uid=hashlib.sha1(f"anchor:{i}".encode()).hexdigest()[:16],
+                speaker="",   # plain text: there is no speaker to record
             )

@@ -1,0 +1,5 @@
+out_root: data/prepared
+holdout_ratio: 0.02
+datasets:
+  zeroth_ko: {out_dir: data/tokenized, text_cfg: null}
+  text_anchor: {jsonl: data/raw/text_anchor.jsonl, max_len: 2048}

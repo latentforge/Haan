@@ -1,0 +1,44 @@
+# SINGLE SOURCE OF TRUTH for special-token ids.
+#
+# PAD/EPAD are NEW tokens assigned to Qwen3's reserved special-token slots.
+# Do NOT reuse <|im_end|>/<|im_start|>: those fire ~1x per turn while stream PAD is
+# ~65% of English dialogue text tokens, so reusing them would overwrite Qwen's
+# learned "end of generation" association and damage the instruction-following
+# ability the text anchor exists to preserve.
+#
+# Stream PAD (a prediction target, down-weighted x0.3) is NOT the batch pad token
+# (fully loss-masked). They must stay distinct -- see TokenConfig.require().
+#
+# Nulls are intentional: the slot assignment is still open. Every consumer asserts
+# loudly rather than defaulting, so nothing can silently train on a wrong id.
+
+tokenizer_name: Qwen/Qwen3-8B
+
+# Qwen3-8B has 151936 embedding rows but only 151669 real tokens (highest id
+# 151668), leaving 267 unused rows. These are genuine reserved slots: they exist
+# in the weight matrix, so no resize is needed, and nothing has ever been trained
+# into them -- which is exactly what a brand-new token wants.
+text_pad_id: 151669
+text_epad_id: 151670
+batch_pad_id: 151671
+audio_init_id: 2048    # CODEBOOK_SIZE: Moshi's audio tables are [2049, dim]
+
+# The (K, P) bank of real Mimi silence frames that fills the absent user channel
+# of every solo sample. NOT one constant code per codebook: measured against the
+# real codec, only cb0 (the WavLM-distilled semantic VQ) is near-constant; cb1..7
+# are acoustic residuals over the noise floor with modal shares of 0.24-0.55 and
+# no short cycle. The dataset tiles this bank with a random phase per sample.
+#
+# Derive with: uv run python -m training.tools.derive_silence_codes
+# Do NOT hand-write zeros -- 0 is a valid Mimi code, not silence.
+#
+# Kept out of this file on purpose (~2k integers); loaded from the derived JSON,
+# which also carries the codec id checked against mimi_ckpt_id below.
+silence_bank_path: configs/data/mimi_silence.json
+# kmhf/hf-moshiko is the HF/transformers conversion of kyutai/moshiko-pytorch-bf16
+# -- same Mimi weights, and the only form actually loadable here.
+mimi_ckpt_id: kmhf/hf-moshiko
+
+# Mirrors of data_pipeline.schema; asserted equal at load so drift fails fast.
+codebook_size: 2048
+num_codebooks: 8
