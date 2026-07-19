@@ -1,4 +1,4 @@
-"""Shared fixtures for the training/datasets test suite.
+"""Shared fixtures for the project_amnesty/datasets test suite.
 
 Fixtures build real Arrow datasets through Sample.to_row() + arrow_features() --
 the same path prepare_dataset.write() uses. Arrow is never mocked: the flat-store
@@ -17,8 +17,15 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from data_pipeline.schema import CODEBOOK_SIZE, NUM_CODEBOOKS, Sample, arrow_features  # noqa: E402
-from training.datasets.config import DataConfig, TokenConfig  # noqa: E402
+# Tests live in per-package subdirectories (tests/datasets, tests/losses, tests/tools),
+# so pytest puts *their* directory on sys.path, not this one. The `from conftest
+# import make_*_sample` in those files needs tests/ itself.
+TESTS_ROOT = Path(__file__).resolve().parent
+if str(TESTS_ROOT) not in sys.path:
+    sys.path.insert(0, str(TESTS_ROOT))
+
+from project_amnesty.datasets.schema import CODEBOOK_SIZE, NUM_CODEBOOKS, Sample, arrow_features  # noqa: E402
+from project_amnesty.datasets.config import DataConfig, TokenConfig  # noqa: E402
 
 # Dummy ids standing in for the still-unassigned reserved Qwen3 slots. Tests must
 # never depend on the real values -- that is the whole point of config injection.

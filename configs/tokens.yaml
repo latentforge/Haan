@@ -29,7 +29,7 @@ audio_init_id: 2048    # CODEBOOK_SIZE: Moshi's audio tables are [2049, dim]
 # are acoustic residuals over the noise floor with modal shares of 0.24-0.55 and
 # no short cycle. The dataset tiles this bank with a random phase per sample.
 #
-# Derive with: uv run python -m training.tools.derive_silence_codes
+# Derive with: uv run python -m project_amnesty.tools.derive_silence_codes
 # Do NOT hand-write zeros -- 0 is a valid Mimi code, not silence.
 #
 # Kept out of this file on purpose (~2k integers); loaded from the derived JSON,
@@ -39,6 +39,6 @@ silence_bank_path: configs/data/mimi_silence.json
 # -- same Mimi weights, and the only form actually loadable here.
 mimi_ckpt_id: kmhf/hf-moshiko
 
-# Mirrors of data_pipeline.schema; asserted equal at load so drift fails fast.
+# Mirrors of project_amnesty.datasets.schema; asserted equal at load so drift fails fast.
 codebook_size: 2048
 num_codebooks: 8

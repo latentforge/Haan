@@ -1,4 +1,4 @@
-# TextTokCfg (data_pipeline/datasets/mixins.py).
+# TextTokCfg (project_amnesty/datasets/mixins.py).
 #
 # MIRROR of configs/tokens.yaml. Kept literal because this file is loaded by a
 # bare yaml.safe_load into a dataclass, which cannot resolve interpolation.

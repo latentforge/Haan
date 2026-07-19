@@ -1,6 +1,6 @@
 # Training-time data stack: dataset -> collator -> sampler -> DataLoader.
 #
-# Group names MUST match data_pipeline.datasets `source` attributes and the
+# Group names MUST match project_amnesty.datasets `source` attributes and the
 # directory names prepare_dataset writes, because mixing_sampler draws at that
 # granularity. A typo here is a KeyError at build time, which is the intent.
 

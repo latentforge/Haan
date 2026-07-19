@@ -1,8 +1,8 @@
-# FilterConfig (data_pipeline/datasets/en_kd_dataset.py).
+# FilterConfig (project_amnesty/datasets/en_kd_dataset.py).
 #
 # Self-talk collapses in characteristic ways; each threshold below targets one.
 # Re-run the filter alone after editing:
-#   python -m data_pipeline.datasets en_kd --stage filter \
+#   python -m project_amnesty.datasets en_kd --stage filter \
 #       --filter-config configs/data/filter.yaml
 # It rewrites accepted.json + filter_report.json without regenerating anything,
 # and the report's per-reason counts are what you tune against.
