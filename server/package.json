@@ -1,0 +1,15 @@
+{
+  "name": "haan-demo",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Haan AI 카드상담 데모 — Mock 백엔드 + 상담사 콘솔 UI + 고객 앱 브리지 (무의존성)",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
