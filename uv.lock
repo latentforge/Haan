@@ -3187,7 +3187,7 @@ wheels = [
 [[package]]
 name = "transformers"
 version = "5.15.0.dev0"
-source = { git = "https://github.com/latentforge/transformers-moshi.git#f21c368a125de2095d0bc361bc5178fca64f1166" }
+source = { git = "https://github.com/latentforge/transformers-moshi.git#5bddccfbaec857a6971e95ea9141afea0c237988" }
 dependencies = [
     { name = "huggingface-hub" },
     { name = "numpy" },
