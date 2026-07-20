@@ -44,9 +44,9 @@ from typing import Iterator
 import numpy as np
 import yaml
 
-from .schema import Sample
-from .base import BaseDataset
-from .mixins import (
+from ..schema import Sample
+from ..base import BaseDataset
+from ..mixins import (
     MOSHI_TEXT_PAD_ID,
     MOSHI_TEXT_TOKENIZER,
     TextTokCfg,

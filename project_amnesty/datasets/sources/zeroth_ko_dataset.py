@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Iterator
 
-from .base import AudioSourceDataset, RawEntry
+from ..base import AudioSourceDataset, RawEntry
 
 
 class ZerothKoDataset(AudioSourceDataset):

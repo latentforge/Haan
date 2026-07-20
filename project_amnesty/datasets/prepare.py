@@ -32,11 +32,18 @@ Group selection is N:1 and derived from ``REGISTRY``, never hardcoded -- see
 from __future__ import annotations
 
 import argparse
-import fcntl
 import json
 import os
 import sys
 import time
+
+# Advisory locking is platform-split: fcntl does not exist on Windows. Production
+# builds run on POSIX (flock); the msvcrt path exists so the module imports and
+# the sentinel logic stays testable on a Windows dev box.
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -141,11 +148,22 @@ def group_lock(root: Path, group: str):
     lock_file = lock_dir / f"{group}.lock"
     fd = os.open(str(lock_file), os.O_CREAT | os.O_RDWR, 0o644)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        if os.name == "nt":
+            # msvcrt byte-range lock. LK_LOCK retries ~10x over ~10s then raises
+            # instead of blocking forever -- acceptable on a dev box, where the
+            # contention flock guards against (two ranks sharing a build) does
+            # not occur. Production stays on flock.
+            msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+        else:
+            fcntl.flock(fd, fcntl.LOCK_EX)
         try:
             yield lock_file
         finally:
-            fcntl.flock(fd, fcntl.LOCK_UN)
+            if os.name == "nt":
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(fd, fcntl.LOCK_UN)
     finally:
         os.close(fd)
 

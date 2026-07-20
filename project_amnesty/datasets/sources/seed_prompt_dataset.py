@@ -31,9 +31,9 @@ from typing import Iterator
 
 import numpy as np
 
-from .schema import SAMPLE_RATE
-from .base import BaseDataset
-from .mixins import MimiEncoderMixin
+from ..schema import SAMPLE_RATE
+from ..base import BaseDataset
+from ..mixins import MimiEncoderMixin
 
 AUDIO_EXTS = (".wav", ".flac", ".mp3", ".opus", ".ogg")
 

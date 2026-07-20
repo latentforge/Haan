@@ -15,9 +15,9 @@ from typing import Iterator
 
 import numpy as np
 
-from .schema import Sample
-from .base import BaseDataset
-from .mixins import TextTokCfg
+from ..schema import Sample
+from ..base import BaseDataset
+from ..mixins import TextTokCfg
 
 
 class TextAnchorDataset(BaseDataset):

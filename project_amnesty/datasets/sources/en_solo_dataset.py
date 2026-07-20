@@ -19,9 +19,9 @@ from typing import Iterator
 
 import numpy as np
 
-from .schema import FRAME_RATE_HZ
-from .base import BaseDataset
-from .mixins import NpzPairIOMixin, TextTokCfg
+from ..schema import FRAME_RATE_HZ
+from ..base import BaseDataset
+from ..mixins import NpzPairIOMixin, TextTokCfg
 
 
 def find_solo_windows(

@@ -1,17 +1,17 @@
 """Base classes organized by operating principle: BaseDataset + family bases + registry.
 
-Folder layout — one file per concrete dataset, named after it:
+Folder layout — one file per concrete dataset, named after it, under sources/:
 
   base.py                      BaseDataset (contract + auto-registry)
                                + AudioSourceDataset (audio-source family base) + RawEntry
   mixins.py                    overlapping functionality (MimiEncoder / TextAlign / NpzPairIO)
-  kss_dataset.py               KSSDataset
-  common_voice_ko_dataset.py   CommonVoiceKoDataset
-  zeroth_ko_dataset.py         ZerothKoDataset
-  en_kd_dataset.py             EnKDDialogueDataset (self-talk generation + quality filter)
-  en_solo_dataset.py           EnSoloDataset (solo-speech crops from en_kd artifacts)
-  seed_prompt_dataset.py       SeedPromptDataset (short EN clips → Mimi codes, en_kd priming)
-  text_anchor_dataset.py       TextAnchorDataset (plain-text jsonl → token sequences)
+  sources/kss_dataset.py               KSSDataset
+  sources/common_voice_ko_dataset.py   CommonVoiceKoDataset
+  sources/zeroth_ko_dataset.py         ZerothKoDataset
+  sources/en_kd_dataset.py             EnKDDialogueDataset (self-talk ingest + quality filter)
+  sources/en_solo_dataset.py           EnSoloDataset (solo-speech crops from en_kd artifacts)
+  sources/seed_prompt_dataset.py       SeedPromptDataset (short EN clips → Mimi codes, en_kd priming)
+  sources/text_anchor_dataset.py       TextAnchorDataset (plain-text jsonl → token sequences)
 
 Contract shared by every dataset:
   * build():        raw data → tokenized artifacts under out_dir/<name>/
@@ -125,10 +125,10 @@ class AudioSourceDataset(MimiEncoderMixin, TextAlignMixin, NpzPairIOMixin, BaseD
     iter_entries().
 
     To add a new source:
-      1. Create <name>_dataset.py with an AudioSourceDataset subclass — implement
-         iter_entries() only
+      1. Create sources/<name>_dataset.py with an AudioSourceDataset subclass —
+         implement iter_entries() only
       2. The `name` class attribute automatically becomes the registry key
-         (import it in __init__.py)
+         (import it in sources/__init__.py)
       3. Run: python -m project_amnesty.datasets <name> --root ...
     Nothing changes on the training side.
     """

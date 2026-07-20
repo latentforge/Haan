@@ -7,8 +7,8 @@ from typing import Iterator
 
 import numpy as np
 
-from .schema import SAMPLE_RATE
-from .base import AudioSourceDataset, RawEntry
+from ..schema import SAMPLE_RATE
+from ..base import AudioSourceDataset, RawEntry
 
 
 class CommonVoiceKoDataset(AudioSourceDataset):

@@ -87,7 +87,7 @@ def test_pad_and_epad_are_distinct(tokens: dict):
 def test_filter_config_loads():
     """filter.yaml is consumed by a bare dataclass ctor -- a stray key raises
     TypeError at ingest time, after the dialogues have been read. Fail here."""
-    from project_amnesty.datasets.en_kd_dataset import FilterConfig
+    from project_amnesty.datasets.sources.en_kd_dataset import FilterConfig
 
     filt = FilterConfig.from_yaml(str(FILTER))
     assert 0.0 < filt.silence_ratio_min < filt.silence_ratio_max < 1.0
