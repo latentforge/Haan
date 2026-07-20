@@ -305,8 +305,8 @@ def run_phase(name: str, resume: str | None, out_dir: str = "checkpoints") -> st
 
     Phase-transition switches (delay/mix/graft) all arrive through the JSON config selected
     here, so no model/loss rebuild happens in the runner (delay is swapped in the collator via
-    KDCollator.set_delay(); ARCHITECTURE §5.0.2). NOTE: project_amnesty.datasets/.models stay
-    empty and are off-limits — the runner never imports them; it only orchestrates train/evaluate.
+    KDCollator.set_delay(); ARCHITECTURE §5.0.2). NOTE: the runner never imports
+    project_amnesty.datasets/.models directly — it only orchestrates train/evaluate (which own them).
     """
     config_path = PHASE_CONFIG[name]
     # Thread out_dir + phase (and resume when present) as explicit CLI flags. train.parse_args

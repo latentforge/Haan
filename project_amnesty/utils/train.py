@@ -30,14 +30,15 @@ Run: `python -m project_amnesty.utils.train --config configs/phase2_joint.json`
 Config is JSON (no yaml). ModelArgs/DataArgs/TrainArgs are defined at the top of this
 file as @dataclass per the HF `run_clm.py` convention and parsed with `HfArgumentParser`.
 
-Note: `project_amnesty/models/` and `project_amnesty/datasets/` now exist as STUBS
-(names only -- classes/functions defined, bodies raise NotImplementedError). So the
-missing-reference TODOs are gone: `build_model` / `build_dataloader` lazily import and
-delegate to those named entry points, and `build_loss_fn` imports the output-layout
-reference. What remains is genuine implementation: the stub bodies (models/ + datasets/)
-and the in-file loss math in `build_loss_fn`. Everything else (FSDP2 wrapping, optimizer
-construction, the training loop, checkpoint I/O, diagnostics, argument parsing) is
-implemented for real here and imports cleanly with no heavy dependencies installed.
+Note: `project_amnesty/datasets/` is a REAL, fully-implemented data stack and
+`project_amnesty/losses/` provides the real semantic-KD loss, so `build_dataloader` and
+`build_loss_fn` delegate to them for real (lazy import). `project_amnesty/models/` exposes
+the real transformers-based classes (HaanConfig / HaanModel / HaanForConditionalGeneration);
+the configs are functional, but the forward and Moshi warm-start (`from_pretrained`) bodies are
+still TODO and raise NotImplementedError -- so `build_model` is the only builder that cannot yet
+run end to end. Everything else here (FSDP2 wrapping, optimizer construction, the training loop,
+checkpoint I/O, diagnostics, argument parsing) is implemented for real and imports cleanly with
+no heavy dependencies installed.
 """
 
 from __future__ import annotations
@@ -173,7 +174,7 @@ class TrainArgs:
 
 
 # ======================================================================================
-# 2. Component builders (models/datasets are still empty -> TODO comment + NotImplementedError)
+# 2. Component builders (datasets/losses are real; only models/'s forward + warm-start bodies are TODO -> NotImplementedError)
 # ======================================================================================
 
 def build_model(margs: ModelArgs, targs: TrainArgs) -> "torch.nn.Module":
@@ -185,8 +186,8 @@ def build_model(margs: ModelArgs, targs: TrainArgs) -> "torch.nn.Module":
       4096 space, 5.4.1).
     - Liger Kernel is injected into the backbone via `use_liger_kernel`/`liger_config` (5.1).
     """
-    # models/ now provides the named entry point (stub -- ARCH 5). Construction + Moshi
-    # warm-start live inside HaanForConditionalGeneration.from_pretrained (5.4.1/5.4.2).
+    # models/ provides the real class; construction + Moshi warm-start live inside
+    # HaanForConditionalGeneration.from_pretrained, whose body is still TODO (ARCH 5.4.1/5.4.2).
     from project_amnesty.models import HaanForConditionalGeneration
 
     return HaanForConditionalGeneration.from_pretrained(
@@ -234,9 +235,10 @@ def build_dataloader(dargs: DataArgs, targs: TrainArgs, split: str = "train") ->
 
 
 # --------------------------------------------------------------------------------------
-# Assumed MODEL I/O + BATCH contract consumed by the loss (and by the on-policy hook).
-# `models/` and `datasets/` stay name-only stubs; this is the documented interface a real
-# implementation must satisfy so both this file and the sibling `evaluate.py` stay aligned.
+# MODEL I/O + BATCH contract consumed by the loss (and by the on-policy hook).
+# `datasets/` already emits this batch for real; the model's forward is the part still TODO.
+# This is the documented interface both this file and the sibling `evaluate.py` are written
+# against, so they stay aligned once the model forward lands.
 # Every access below is guarded (getattr / `in` / `.get`) with a clear error, so a real
 # model/collator that follows the contract "just works" and a non-conforming one fails loud.
 #
@@ -1693,8 +1695,9 @@ def main() -> None:
 
     dist_started = _init_distributed()  # fix2: guarded env(WORLD_SIZE/RANK) init, no-op single-process
     try:
-        # The three build_* hooks currently raise NotImplementedError (models/datasets are stubs);
-        # everything wrapped around them -- FSDP2, optimizer, scheduler, resume, the loop -- is real.
+        # build_model raises NotImplementedError until the models/ forward + warm-start land
+        # (datasets/ and losses/ are already real); everything wrapped around it -- FSDP2,
+        # optimizer, scheduler, resume, the loop -- is real.
         model = build_model(margs, targs)
 
         # fix3: enable activation (gradient) checkpointing BEFORE the FSDP2 wrap. hasattr/try guarded

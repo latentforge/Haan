@@ -35,27 +35,25 @@ training (RISKS §1 · CURRICULUM §0).
 
 Run: `python -m project_amnesty.utils.evaluate --ckpt <path> --checkpoint-tag C`
 
-Note (file-map rule): this is a standalone entry point, so
-`project_amnesty/models/` and `datasets/` are **intentionally empty**. The real
-loading / generation code is wired in only after those packages are filled --
-for now, no runtime imports of them are allowed; the connection points are marked
-by TODO comments only. Heavy imports (torch, transformers, ASR libraries) are also
-deferred: they live at the TODO site inside each function body, not at module top,
-to keep entry-point load cost minimal.
+Note (file-map rule): this is a standalone entry point. `project_amnesty/datasets/` is
+real and already used here (eval_mechanism's probe loader imports it), while
+`project_amnesty/models/` exposes the real classes but its forward / warm-start bodies
+are still TODO -- so the model-dependent eval bodies raise NotImplementedError at runtime
+until that lands. Heavy imports (torch, transformers, ASR libraries) are deferred: they
+live INSIDE each function body, not at module top, to keep entry-point load cost minimal.
 """
 
 from __future__ import annotations
 
 import argparse
 
-# Reference now available (STUBS):
-#   from project_amnesty.models.modeling_haan import HaanForConditionalGeneration
-#   from project_amnesty.datasets.loader import build_dataloader   (split="probe" holdout)
-# models/ and datasets/ now define these names, so the connection is no longer a
-# missing-reference TODO. They are still imported lazily INSIDE each eval body (kept off the
-# entry-point load path). What remains in eval_content / eval_mechanism / probe_representations
-# is genuine *implementation* (generation loop, external ASR, timing/overlap, probing) that
-# lives here in evaluate.py -- not something creating models/ or datasets/ can supply.
+# References used here (imported lazily INSIDE each eval body, off the entry-point load path):
+#   from project_amnesty.models.modeling_haan import HaanForConditionalGeneration  (forward TODO)
+#   from project_amnesty.datasets.loader import build_dataloader   (real; split="probe" holdout)
+# datasets/ is fully implemented, so the probe loader runs for real; the model's forward is the
+# only piece still TODO. What lives in eval_content / eval_mechanism / probe_representations is
+# genuine *implementation* (generation loop, external ASR, timing/overlap, probing) that belongs
+# in evaluate.py -- not something models/ or datasets/ can supply.
 # NOTE: the standalone Mimi round-trip tool was removed; the §4.3 codec ceiling used for WER
 # attribution (RISKS §6) is now computed inline in eval_content (Mimi encode->decode->ASR on the
 # same probe audio), not via a separate tool.
@@ -228,7 +226,7 @@ def _corpus_error_rate(
 
 
 # ---------------------------------------------------------------------------
-# Model-dependent evaluations (bodies stay TODO until models/ and datasets/ exist).
+# Model-dependent evaluations (datasets/ is real; these raise NotImplementedError until the models/ forward lands).
 # ---------------------------------------------------------------------------
 
 def eval_content(ckpt: str, split: str = "probe") -> dict:
@@ -277,12 +275,12 @@ def eval_content(ckpt: str, split: str = "probe") -> dict:
 # Model / checkpoint access helpers -- the DOCUMENTED model I/O contract that
 # eval_mechanism and probe_representations are implemented against.
 #
-# `project_amnesty/models/` (and `datasets/`) are still STUBS (names only), so
-# every call below raises NotImplementedError at *runtime*. That is intended: the
-# LOGIC here is complete and written against a documented contract, so once a real
-# models/ implements that contract the two evaluations run unchanged ("just works").
-# All heavy imports (torch / numpy / model / datasets) are kept LOCAL to each body
-# so this entry-point module still imports with no heavy dependencies installed.
+# `project_amnesty/datasets/` is real and used here; `project_amnesty/models/` exposes the
+# real classes but its forward body is still TODO, so every model call below raises
+# NotImplementedError at *runtime*. That is intended: the LOGIC here is complete and written
+# against a documented contract, so once the model forward lands these evaluations run
+# unchanged ("just works"). All heavy imports (torch / numpy / model / datasets) are kept LOCAL
+# to each body so this entry-point module still imports with no heavy dependencies installed.
 #
 # Attribute names are kept IDENTICAL to what utils/train.py's diagnostics read, so
 # training and evaluation see the same model:
@@ -312,11 +310,12 @@ ROLE_COS_BASELINE_ACOUSTIC = 0.751
 def _load_model(ckpt: str):
     """Construct the Haan model and load `ckpt` weights (model I/O contract above).
 
-    Delegates to `project_amnesty.models.HaanForConditionalGeneration`. That package is a
-    stub today, so this raises NotImplementedError at runtime -- intended (see module note).
-    Heavy imports are local so the entry point stays importable without torch/transformers.
+    Delegates to `project_amnesty.models.HaanForConditionalGeneration`. The class is real but
+    its forward / warm-start body is still TODO, so this raises NotImplementedError at runtime
+    -- intended (see module note). Heavy imports are local so the entry point stays importable
+    without torch/transformers.
     """
-    from project_amnesty.models import HaanForConditionalGeneration  # noqa: PLC0415 (lazy, stub)
+    from project_amnesty.models import HaanForConditionalGeneration  # noqa: PLC0415 (lazy; forward TODO)
 
     model = HaanForConditionalGeneration.from_pretrained(ckpt)
     if hasattr(model, "eval"):
@@ -745,7 +744,7 @@ def _turntaking_features(model, prefixes):
 
     Uses the per-frame Temporal context vector z_s -- the representation the Depth turn-taking
     prediction reads (ARCH §5.0 eq.1) -- exposed as `outputs.hidden_states` (last layer) or
-    `outputs.z`, mean-pooled over the frame axis. Raises via the stub model until models/ is real.
+    `outputs.z`, mean-pooled over the frame axis. Raises until the models/ forward body lands.
     """
     import numpy as np  # noqa: PLC0415
     import torch  # noqa: PLC0415
@@ -1261,7 +1260,7 @@ def main() -> None:
     )
 
     # run_checkpoint is a real dispatcher; it raises NotImplementedError from within the
-    # model-dependent sub-evaluations until models/ and datasets/ are filled. The report
+    # model-dependent sub-evaluations until the models/ forward lands (datasets/ is already real). The report
     # keeps content / mechanism / probing under separate keys -- never summed into one
     # scalar (RISKS §4).
     report = run_checkpoint(args.ckpt, args.checkpoint_tag)
