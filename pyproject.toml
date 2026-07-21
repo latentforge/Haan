@@ -1,24 +1,34 @@
 [project]
 name = "haan"
 version = "0.1.0"
-description = "Add your description here"
+description = "Haan: Hearing Always, Acting Naturally / A Korean Full-duplex Agent Model"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "torch",
+    "torchaudio>=2.11.0",
     "transformers>=5.14.1",
     "bitsandbytes>=0.45.0",
     "datasets>=5.0.0",
     "kernels>=0.16.0",
     "soundfile>=0.14.0",
     "scipy>=1.18.0",
+    "matplotlib>=3.11.0",
+]
+
+[project.optional-dependencies]
+personaplex = [
     "sentencepiece>=0.2.2",
+    "protobuf>=7.35.1",
+    "pyloudnorm>=0.2.0",
+]
+dev = [
     "nbconvert>=7.17.1",
     "nbformat>=5.10.4",
     "ipykernel>=7.3.0",
     "jupyter-client>=8.9.1",
-    "matplotlib>=3.11.0",
-    "torchaudio>=2.11.0",
+    "ipywidgets>=8.1.8",
+    "ipywebrtc>=0.6.0",
 ]
 
 [tool.uv.sources]
@@ -28,7 +38,7 @@ torch = [
 torchaudio = [
     { index = "pytorch-cu126" },
 ]
-transformers = { git = "https://github.com/latentforge/transformers-moshi.git" }
+transformers = { git = "https://github.com/latentforge/transformers-moshi.git", branch = "feat/personaplex" }
 
 [tool.uv.extra-build-dependencies]
 flash-attn = [ "torch" ]
@@ -37,13 +47,3 @@ flash-attn = [ "torch" ]
 name = "pytorch-cu126"
 url = "https://download.pytorch.org/whl/cu126"
 explicit = true
-
-[dependency-groups]
-dev = [
-    "pytest>=9.1.1",
-]
-
-[tool.pytest.ini_options]
-markers = [
-    "slow: loads a real model or otherwise takes seconds; deselect with -m 'not slow'",
-]
