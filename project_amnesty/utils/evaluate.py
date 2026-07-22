@@ -35,11 +35,10 @@ training (RISKS §1 · CURRICULUM §0).
 
 Run: `python -m project_amnesty.utils.evaluate --ckpt <path> --checkpoint-tag C`
 
-Note (file-map rule): this is a standalone entry point. `project_amnesty/datasets/` is
-real and already used here (eval_mechanism's probe loader imports it), while
-`project_amnesty/models/` exposes the real classes but its forward / warm-start bodies
-are still TODO -- so the model-dependent eval bodies raise NotImplementedError at runtime
-until that lands. Heavy imports (torch, transformers, ASR libraries) are deferred: they
+Note (file-map rule): this is a standalone entry point. `project_amnesty/datasets/` is real
+and already used here (eval_mechanism's probe loader imports it), and
+`project_amnesty/models/haan/` is a real transformers Moshi subclass -- forward and generate
+are inherited and work. Heavy imports (torch, transformers, ASR libraries) are deferred: they
 live INSIDE each function body, not at module top, to keep entry-point load cost minimal.
 """
 
@@ -48,7 +47,7 @@ from __future__ import annotations
 import argparse
 
 # References used here (imported lazily INSIDE each eval body, off the entry-point load path):
-#   from project_amnesty.models.modeling_haan import HaanForConditionalGeneration  (forward TODO)
+#   from project_amnesty.models.haan import HaanForConditionalGeneration          (real)
 #   from project_amnesty.datasets.loader import build_dataloader   (real; split="probe" holdout)
 # datasets/ is fully implemented, so the probe loader runs for real; the model's forward is the
 # only piece still TODO. What lives in eval_content / eval_mechanism / probe_representations is
@@ -207,7 +206,11 @@ def _corpus_error_rate(
         level: "word" for WER-style tokenization, "char" for CER-style.
 
     Returns:
-        Micro-averaged error rate. Returns 0.0 for an empty corpus.
+        Micro-averaged error rate. Returns 0.0 for an empty corpus (no pairs at all), and `nan`
+        when there are pairs but every reference is empty -- that is a broken corpus, not a
+        perfect transcription. `total_length` counts reference tokens only, so without this the
+        function returns 0.0 (a flawless score) for a corpus whose transcripts all failed to load,
+        while `wer("", "hallucinated words")` on the same pair returns 1.0.
     """
     total_distance = 0
     total_length = 0
@@ -221,7 +224,9 @@ def _corpus_error_rate(
         total_distance += _levenshtein(ref_tokens, hyp_tokens)
         total_length += len(ref_tokens)
     if total_length == 0:
-        return 0.0
+        # No pairs at all -> nothing was measured, 0.0 is honest. Pairs present but no reference
+        # tokens -> the references are missing, and any number here would be a lie.
+        return 0.0 if not pairs else float("nan")
     return total_distance / total_length
 
 
@@ -275,21 +280,31 @@ def eval_content(ckpt: str, split: str = "probe") -> dict:
 # Model / checkpoint access helpers -- the DOCUMENTED model I/O contract that
 # eval_mechanism and probe_representations are implemented against.
 #
-# `project_amnesty/datasets/` is real and used here; `project_amnesty/models/` exposes the
-# real classes but its forward body is still TODO, so every model call below raises
-# NotImplementedError at *runtime*. That is intended: the LOGIC here is complete and written
-# against a documented contract, so once the model forward lands these evaluations run
-# unchanged ("just works"). All heavy imports (torch / numpy / model / datasets) are kept LOCAL
-# to each body so this entry-point module still imports with no heavy dependencies installed.
+# `project_amnesty/datasets/` and `project_amnesty/models/haan/` are both real; the model's
+# forward / generate are inherited from transformers' Moshi and run. All heavy imports
+# (torch / numpy / model / datasets) are kept LOCAL to each body so this entry-point module
+# still imports with no heavy dependencies installed.
+#
+# CAVEAT -- the forward signature below is Haan's INTENDED contract, not Moshi's inherited one.
+# `MoshiForConditionalGeneration.forward` takes `user_audio_codes` / `assistant_audio_codes`
+# (not a single `audio_codes`) and only populates `audio_logits` when `text_labels` AND
+# `audio_labels` are both given, shaped `(batch * sequence_length, 2K, C)` rather than
+# `(B, 2, K, T, C)`. models/haan does not override `forward`, so the eval bodies below that
+# call the model directly need that adapter to land first. Flagged rather than silently
+# reshaped here: guessing the axis order would corrupt every metric downstream.
 #
 # Attribute names are kept IDENTICAL to what utils/train.py's diagnostics read, so
-# training and evaluation see the same model:
-#   model.role_emb        : (2, D) additive self/user Role Token            (ARCH §3.3)
-#   model.audio_emb       : shared audio input embedding -- K per-codebook
-#                           tables OR a single (K, C, D) tensor; the user-side
-#                           init is copied from Moshi emb.8~15               (ARCH §5.4.2)
-#   model.depth_role_emb  : (2, D_depth) Depth-side additive role embedding
-#                           (optional)                                       (ARCH §5.4)
+# training and evaluation see the same model. They are the real names on
+# `project_amnesty.models.haan.HaanForConditionalGeneration`:
+#   model.embed_tokens                       nn.ModuleList of K shared audio input embedding
+#                                            tables; the init is copied from Moshi's user-side
+#                                            tables                                   (ARCH §5.4.2)
+#   model.role_embedding                     RoleEmbedding -- Temporal self/user role signal,
+#                                            parameter `role_scale` (role_mode="scale", default)
+#                                            or `role_emb` (role_mode="additive"), (num_roles, D)
+#                                                                                     (ARCH §3.3)
+#   model.depth_decoder.model.role_embedding Depth-side RoleEmbedding, (num_roles, D_depth)
+#                                                                                     (ARCH §5.4)
 #   model(input_ids=, audio_codes=[, role_ids=]) -> outputs with
 #       outputs.audio_logits (B, 2, K, T, C)  # axis 1 = [self, user] streams (ARCH §5.0.3/§5.4)
 #       outputs.text_logits  (B, T, V)
@@ -306,16 +321,28 @@ FRAME_RATE_HZ = 12.5
 ROLE_COS_BASELINE_SEMANTIC = 0.501
 ROLE_COS_BASELINE_ACOUSTIC = 0.751
 
+# NOT SPECIFIED BY THE DOCS. Every 0.6 s figure in the docs is a TEXT delay (Table 1:
+# text delay = +-0.6 s pre-training -> 0 after; TRAINING_CURRICULUM "Delay 설정",
+# ARCHITECTURE §5.0.2) -- there is no documented 0.6 s backchannel-duration cutoff.
+# This threshold began life as `round(0.6 * FRAME_RATE_HZ)` = round(7.5): the exact
+# 7.5-frame tie that collator._frames_from_sec ASSERTS against rather than silently
+# resolve, and round() quietly picks 8. So 8 is a rounding of a 0.6 s GUESS made here
+# and needs empirical confirmation; it is not a documented value.
+# _bargein_backchannel classifies with a STRICT `<` (`length < BACKCHANNEL_MAX_FRAMES`),
+# so the effective boundary is "a self run of <= 7 frames (~0.56 s) fully inside a user
+# turn = backchannel; 8+ frames = barge-in".
+BACKCHANNEL_MAX_FRAMES = 8
+
 
 def _load_model(ckpt: str):
     """Construct the Haan model and load `ckpt` weights (model I/O contract above).
 
-    Delegates to `project_amnesty.models.HaanForConditionalGeneration`. The class is real but
-    its forward / warm-start body is still TODO, so this raises NotImplementedError at runtime
-    -- intended (see module note). Heavy imports are local so the entry point stays importable
-    without torch/transformers.
+    Delegates to `project_amnesty.models.haan.HaanForConditionalGeneration`, whose
+    `from_pretrained` is transformers' own -- `ckpt` is a trained Haan checkpoint directory, NOT
+    a Moshi warm-start source (that is `warm_start_from_moshi`, called by train.build_model).
+    Heavy imports are local so the entry point stays importable without torch/transformers.
     """
-    from project_amnesty.models import HaanForConditionalGeneration  # noqa: PLC0415 (lazy; forward TODO)
+    from project_amnesty.models.haan import HaanForConditionalGeneration  # noqa: PLC0415 (lazy)
 
     model = HaanForConditionalGeneration.from_pretrained(ckpt)
     if hasattr(model, "eval"):
@@ -356,11 +383,11 @@ def _weight_2d(table):
 
 
 def _audio_emb_tables(audio_emb) -> "list":
-    """Normalize `model.audio_emb` into a list of per-codebook (C, D) numpy tables.
+    """Normalize `model.embed_tokens` into a list of per-codebook (C, D) numpy tables.
 
-    Accepts the two documented layouts: a container (list / tuple / nn.ModuleList) of K
-    per-codebook tables, or a single (K, C, D) tensor/parameter. A bare 2D (C, D) is treated as
-    a single shared table (K == 1).
+    Haan builds this as an `nn.ModuleList` of K `nn.Embedding`s (modeling_haan.py); the
+    (K, C, D) tensor and bare (C, D) forms are also accepted so a checkpoint that stacked them
+    still reads.
     """
     # A container (list / tuple / nn.ModuleList) exposes __len__ but -- unlike a tensor/ndarray --
     # has no .dim / .ndim; a single nn.Embedding has neither __len__ nor .dim.
@@ -371,7 +398,48 @@ def _audio_emb_tables(audio_emb) -> "list":
         return [arr[k] for k in range(arr.shape[0])]
     if arr.ndim == 2:      # single shared (C, D) table
         return [arr]
-    raise ValueError(f"model.audio_emb has unsupported shape {getattr(arr, 'shape', None)}")
+    raise ValueError(f"model.embed_tokens has unsupported shape {getattr(arr, 'shape', None)}")
+
+
+def _audio_embeddings(model):
+    """`model.embed_tokens` -- Haan's K shared audio input tables (ARCH §3.3/§5.4.2).
+
+    Deliberately NOT `model.model.embed_tokens`, which is the backbone's text embedding.
+    """
+    return _require_model_attr(model, "embed_tokens", "K shared audio input embeddings, ARCH §5.4.2")
+
+
+def _role_matrix(role_embedding, where: str):
+    """The `(num_roles, D)` parameter out of a `models.haan.RoleEmbedding`.
+
+    Which attribute holds it depends on `role_mode`: `role_scale` for "scale" (the default) and
+    `role_emb` for "additive". Returns `(parameter, role_mode)` so callers apply the matching
+    formula rather than assuming one (see `_role_row_cosine`).
+    """
+    role_mode = getattr(role_embedding, "role_mode", None)
+    for attr, mode in (("role_scale", "scale"), ("role_emb", "additive")):
+        parameter = getattr(role_embedding, attr, None)
+        if parameter is not None:
+            return parameter, (role_mode or mode)
+    raise AttributeError(
+        f"{where} exposes neither `role_scale` nor `role_emb`; models/haan's RoleEmbedding must "
+        f"hold its (num_roles, D) parameter under one of those names (role_mode={role_mode!r})."
+    )
+
+
+def _temporal_role(model):
+    """Temporal-side role signal (ARCH §3.3) -> (parameter, role_mode)."""
+    role_embedding = _require_model_attr(model, "role_embedding", "Temporal self/user Role Token, ARCH §3.3")
+    return _role_matrix(role_embedding, "model.role_embedding")
+
+
+def _depth_role(model):
+    """Depth-side role signal (ARCH §5.4) -> (parameter, role_mode), or (None, None) if absent."""
+    depth = getattr(model, "depth_decoder", None)
+    role_embedding = getattr(getattr(depth, "model", None), "role_embedding", None)
+    if role_embedding is None:
+        return None, None
+    return _role_matrix(role_embedding, "model.depth_decoder.model.role_embedding")
 
 
 # -- numeric primitives (numpy; inspect_moshi_weights.py style) ---------------
@@ -401,75 +469,61 @@ def _vec_cosine(a, b, eps: float = 1e-8) -> float:
     return float(a.dot(b) / ((np.linalg.norm(a) * np.linalg.norm(b)) + eps))
 
 
-def _role_row_cosine(table, role0, role1) -> float:
-    """Self/user row cosine on the SHARED audio table under the additive Role Token (ARCH §3.3).
+def _role_row_cosine(table, role0, role1, role_mode: str = "scale") -> float:
+    """Self/user row cosine on the SHARED audio table under the Role Token (ARCH §3.3).
 
-    In Haan self and user index the SAME table and differ only by the additive role vector, so
-    the §3.5.1 self-vs-user row cosine becomes cos(table_i + role0, table_i + role1). This
-    reproduces the inspect_moshi_weights measurement on Haan's shared-table construction, so the
-    result is directly comparable to the ARCH §3.5.1 baseline (semantic ~0.50, acoustic ~0.75).
+    In Haan self and user index the SAME table and differ only by the role signal, so the §3.5.1
+    self-vs-user row cosine becomes cos(f(table_i, role0), f(table_i, role1)) where `f` is however
+    `models.haan.RoleEmbedding` applies the role. That is NOT one fixed formula -- the two modes
+    apply the role differently and mixing them up silently reports a number for the wrong model:
+
+      role_mode="scale"     (default)  f = table_i * role      elementwise per-role gain
+      role_mode="additive"  (ablation) f = table_i + role      ARCH §3.3 as literally written
+
+    The result is directly comparable to the ARCH §3.5.1 baseline (semantic ~0.50, acoustic ~0.75).
+
+    Note the additive mode is degenerate at the Temporal input (RoleEmbedding's docstring derives
+    why: adding a constant to a symmetric sum leaves it invariant under a stream swap); it is kept
+    only so the §3.6/§6.2 ablation can measure the gap.
     """
     import numpy as np  # noqa: PLC0415
 
     r0 = np.asarray(role0, dtype=np.float64).ravel()
     r1 = np.asarray(role1, dtype=np.float64).ravel()
-    return _row_cosine(table + r0[None, :], table + r1[None, :])
+    if role_mode == "scale":
+        return _row_cosine(table * r0[None, :], table * r1[None, :])
+    if role_mode == "additive":
+        return _row_cosine(table + r0[None, :], table + r1[None, :])
+    raise ValueError(f"`role_mode={role_mode!r}` must be 'scale' or 'additive' (models.haan.ROLE_MODES).")
 
 
 # -- frame/code-level turn-taking primitives (eval_mechanism) -----------------
 
-def _semantic_silence_from_payload(payload) -> set:
-    """Extract the set of semantic (codebook-0) silence codes from a mimi_silence.json payload.
+def _silence_codes(silence_bank) -> set:
+    """Semantic (level-0) silence codes, read from the VALIDATED silence bank.
 
-    Understands the derive_silence_codes.py schema -- {"silence_bank": [[...], ...],
-    "num_codebooks": K, ...} where `silence_bank` is codebook-major (K rows, one silence-code
-    sequence per codebook), so row 0 is the semantic level. Also accepts a frame-major bank
-    (T rows of K codes -> column 0 is semantic), an explicit {"semantic": [...]}, or a bare list.
+    0 is a valid Mimi code, so silence must be the measured bank (tools/derive_silence_codes.py),
+    never zeros. Takes `DataConfig.tokens.silence_bank` -- the `(K, P)` tuple datasets/config.py
+    loads with a repo-root fallback and a `mimi_ckpt_id` cross-check -- and returns codebook 0's
+    row (semantic level-0) as a set of codes.
+
+    The previous version read `configs/data/mimi_silence.json` by a cwd-relative path (so it broke
+    off repo root) and, on any miss, fell back SILENTLY to "the single most frequent code across
+    the generated streams". That fallback is actively wrong: if the model collapses to one
+    non-silence code, that code becomes the mode, every frame is marked silence, the speech mask
+    goes all-False, and every timing metric reads zero activity -- the exact silence/speech
+    collapse RISKS §7.4 wants VISIBLE, laundered into a clean-looking result. It is removed; the
+    bank is required. Precedent: `_pad_token_ids(data_cfg.tokens)` takes the loaded config rather
+    than re-reading a file.
     """
-    import numpy as np  # noqa: PLC0415
-
-    if isinstance(payload, dict):
-        if "semantic" in payload:
-            return {int(c) for c in np.asarray(payload["semantic"]).ravel()}
-        bank = payload.get("silence_bank")
-        n_codebooks = payload.get("num_codebooks")
-        if bank is None:
-            return set()
-        arr = np.asarray(bank)
-        if arr.ndim == 2:
-            if n_codebooks is not None and arr.shape[1] == n_codebooks and arr.shape[0] != n_codebooks:
-                return {int(c) for c in arr[:, 0].ravel()}  # frame-major -> semantic column
-            return {int(c) for c in arr[0].ravel()}         # codebook-major -> semantic row (default)
-        return {int(c) for c in arr.ravel()}                # 1D bank == semantic sequence
-    arr = np.asarray(payload)
-    return {int(c) for c in (arr[0].ravel() if arr.ndim >= 2 else arr.ravel())}
-
-
-def _silence_codes(semantic_streams, config_path: str = "configs/data/mimi_silence.json"):
-    """Semantic (level-0) silence codes: the MEASURED bank if present, else a modal fallback.
-
-    0 is a valid Mimi code, so silence must be the measured silence bank (ARCH: configs/data/
-    mimi_silence.json / tools/derive_silence_codes.py), NOT zeros. Fallback when the bank is
-    absent (documented, approximate): dialogue is mostly silence, so the single most frequent
-    semantic code across the given streams stands in for the silence bank.
-    """
-    import json  # noqa: PLC0415
-    import os  # noqa: PLC0415
-
-    import numpy as np  # noqa: PLC0415
-
-    if os.path.exists(config_path):
-        with open(config_path, "r", encoding="utf-8") as f:
-            payload = json.load(f)
-        codes = _semantic_silence_from_payload(payload)
-        if codes:
-            return codes
-    stacked = [np.asarray(s).astype(int).ravel() for s in semantic_streams]
-    allc = np.concatenate(stacked) if stacked else np.asarray([], dtype=int)
-    if allc.size == 0:
-        return set()
-    vals, counts = np.unique(allc, return_counts=True)
-    return {int(vals[int(counts.argmax())])}
+    if not silence_bank:
+        raise ValueError(
+            "silence_bank is required for the semantic silence mask (ARCH §4.1 / configs/tokens.yaml "
+            "silence_bank_path). It comes from DataConfig.tokens.silence_bank -- there is no modal "
+            "fallback, because a collapsed generation would poison it silently (RISKS §7.4)."
+        )
+    semantic_row = silence_bank[0]  # codebook 0 = semantic level-0 (ARCH §5.0/§5.1)
+    return {int(c) for c in semantic_row}
 
 
 def _speech_mask_from_semantic(semantic_codes, silence_codes) -> "np.ndarray":
@@ -481,27 +535,24 @@ def _speech_mask_from_semantic(semantic_codes, silence_codes) -> "np.ndarray":
     return ~silent
 
 
-def _pad_token_ids(config_path: str = "configs/tokens.json") -> set:
-    """Plain stream-PAD id(s) from the tokens config (ARCH §5.0.1/§7.6): between-word silence on
-    the text stream (~65% of tokens). A non-PAD frame is a word or the EPAD onset trigger (both =
-    the agent turn is active). Empty set if the config is absent -> caller uses semantic silence.
-    """
-    import json  # noqa: PLC0415
-    import os  # noqa: PLC0415
+def _pad_token_ids(tokens) -> set:
+    """Plain stream-PAD id(s) from the loaded token config (ARCH §5.0.1/§7.6): between-word silence
+    on the text stream (~65% of tokens). A non-PAD frame is a word or the EPAD onset trigger (both
+    = the agent turn is active).
 
-    if not os.path.exists(config_path):
-        return set()
-    with open(config_path, "r", encoding="utf-8") as f:
-        payload = json.load(f)
-    ids = set()
-    if isinstance(payload, dict):
-        for key in ("PAD", "pad", "stream_pad", "STREAM_PAD"):
-            if key in payload:
-                try:
-                    ids.add(int(payload[key]))
-                except (TypeError, ValueError):
-                    pass
-    return ids
+    Takes the already-loaded `DataConfig.tokens` rather than re-reading a file. The previous
+    version read `configs/tokens.json`, which does not exist -- the repo has `configs/tokens.yaml`
+    -- and looked for keys (`PAD`/`pad`/`stream_pad`) that file does not use either; it names them
+    `text_pad_id` / `text_epad_id`. Both misses returned an empty set SILENTLY, so
+    `_self_speech_mask` dropped its text-stream term and every timing metric lost the EPAD onset
+    signal (ARCH §5.0.1: EPAD is the "a word is about to start" trigger) while still reporting a
+    number.
+
+    Only the plain PAD is returned. EPAD is deliberately NOT included: ARCH §5.0.1 makes it the
+    speech-onset signal, so a frame carrying EPAD counts as the agent being active.
+    """
+    pad = getattr(tokens, "text_pad_id", None)
+    return set() if pad is None else {int(pad)}
 
 
 def _self_speech_mask(self_text, self_sem, silence_codes, pad_ids) -> "np.ndarray":
@@ -524,7 +575,14 @@ def _self_speech_mask(self_text, self_sem, silence_codes, pad_ids) -> "np.ndarra
 
 
 def _runs(mask):
-    """List of (start, end) speech runs (contiguous True regions) in a boolean frame mask."""
+    """List of (start, end) speech runs (contiguous True regions) in a boolean frame mask.
+
+    `end` is EXCLUSIVE: it is the first frame *after* the run stops. So when the next turn's onset
+    equals a run's `end`, the between-turn gap is exactly 0 -- a zero-silence adjacent turn switch
+    (the fastest possible clean response), NOT an overlap. The file-wide sign convention is
+    therefore: gap >= 0 == clean turn switch (0 == zero-silence switch); gap < 0 == overlap
+    (responder onset fell strictly inside the partner's run). See _response_gaps / _timing_stats.
+    """
     import numpy as np  # noqa: PLC0415
 
     m = np.asarray(mask).astype(bool).astype(int)
@@ -540,9 +598,11 @@ def _response_gaps(partner_runs, responder_runs):
     """Signed frame gaps from each partner-utterance to the responder's next onset.
 
     For each partner turn, take the first responder onset in [partner_start, next_partner_start):
-    gap = responder_onset - partner_offset. A positive gap = silence between turns (a clean turn
-    switch); a non-positive gap = the responder started before the partner finished (overlap /
-    barge-in). Callers split the two. One response is attributed per partner turn.
+    gap = responder_onset - partner_offset. `partner_offset` is `_runs`' EXCLUSIVE end (first frame
+    after the partner stops), so a non-negative gap (>= 0) = a clean turn switch -- with gap == 0
+    the zero-silence adjacent switch (fastest clean response); a negative gap (< 0) = the responder
+    started strictly before the partner finished (overlap / barge-in). Callers split the two. One
+    response is attributed per partner turn.
     """
     import numpy as np  # noqa: PLC0415
 
@@ -554,7 +614,7 @@ def _response_gaps(partner_runs, responder_runs):
         cand = responder_starts[(responder_starts >= ps) & (responder_starts < next_ps)]
         if cand.size == 0:
             continue
-        gaps.append(int(cand.min()) - pe)  # >0 gap, <=0 overlap
+        gaps.append(int(cand.min()) - pe)  # >=0 clean gap (0 == zero-silence switch), <0 overlap
     return gaps
 
 
@@ -608,41 +668,73 @@ def _timing_stats(gaps_s) -> dict:
         "std_gap_s": float(g.std()),
         "min_gap_s": float(g.min()),
         "max_gap_s": float(g.max()),
-        "n_gap_transitions": int((g > 0).sum()),      # clean turn switches (silence gap)
-        "n_overlap_transitions": int((g <= 0).sum()),  # responder started before partner ended
+        # g==0 reclassified from overlap to clean switch; makes the whole file consistent
+        # (overlap_rate/bargein already exclude it). `_runs` end is exclusive, so gap==0 is a
+        # zero-silence adjacent turn switch, not an overlap.
+        "n_gap_transitions": int((g >= 0).sum()),     # clean turn switches (>=0: silence gap or 0-gap switch)
+        "n_overlap_transitions": int((g < 0).sum()),  # responder started strictly before partner ended
     }
 
 
 def _simulate_dialogue(model, prefix, max_new_frames):
     """q16 simulation generate (ARCH §5.0.3): produce BOTH self and user streams for offline eval.
 
-    Returns three per-batch-element lists (self_semantic, user_semantic, self_text), each entry a
-    frame-aligned 1D int array (self_text is None when the generator does not return it). Frame /
-    code level only -- NO waveform, NO Mimi decode (keeps this off the content path, RISKS §4).
-    """
-    import torch  # noqa: PLC0415
+    **Self-play, not replay.** ARCH §5.0.3 quotes the Moshi paper on why the user stream is modeled
+    as an output at all: *"prediction for the audio coming from the user is actually ignored, as
+    the actual user audio is used instead. However, modeling the user stream as output allows
+    generating simulated dialogues, which is necessary for offline evaluation."* Generating the
+    simulated dialogue IS the purpose of the user head, so the recorded user stream is supplied
+    only as far as the prompt and the model invents the rest. Feeding the recorded user across the
+    horizon would not merely change the measurement -- `generate` returns the predicted user tail
+    only for frames the caller left open, so a horizon-covering user stream yields no user stream
+    at all.
 
-    with torch.no_grad():
-        gen = model.generate(prefix, mode="q16", max_new_frames=max_new_frames)
-    codes = gen["codes"] if isinstance(gen, dict) else getattr(gen, "codes", None)
-    if codes is None:
-        raise AttributeError(
-            "model.generate(...) must return `codes` (B, 2, K, T_gen) -- the self+user streams of "
-            "the q16 simulated dialogue (ARCH §5.0.3)."
-        )
-    codes = _as_ndarray(codes).astype(int)  # (B, 2, K, T)
-    if codes.ndim != 4 or codes.shape[1] < 2:
-        raise ValueError(f"generate codes must be (B, 2, K, T_gen); got shape {codes.shape}")
+    The prompt is cut at the Zone A + Zone B boundary (ARCH §7: static ChatML prefix -> voice
+    prompt -> Zone C dialogue), so exactly the dialogue is simulated and the conditioning prefix is
+    not.
+
+    Returns three per-batch-element lists (self_semantic, user_semantic, self_text), each entry a
+    frame-aligned 1D int array. Frame / code level only -- NO waveform, NO Mimi decode (keeps this
+    off the content path, RISKS §4).
+    """
+    if not isinstance(prefix, dict):
+        raise TypeError(f"expected the collator batch dict; got {type(prefix).__name__}.")
+
+    # Zone A + Zone B is the conditioning prefix; Zone C is what gets simulated. The zone lengths
+    # are per row, and `generate` needs one rectangular prompt, so the batch-wide minimum is used:
+    # cutting shorter than a row's Zone B only means a little of its voice prompt is regenerated,
+    # whereas cutting longer would consume Zone C frames that are supposed to be simulated.
+    zone_a = prefix["zone_a_frames"]
+    zone_b = prefix.get("zone_b_frames")
+    prompt = zone_a if zone_b is None else zone_a + zone_b
+    prompt_frames = max(int(prompt.min()), 1)
+
+    # The rollout -- `generate` plus the END-ANCHORED self/user alignment -- is SHARED with the
+    # on-policy scheduled sampler: `train.rollout_with_contract` owns it, so the two paths cannot
+    # drift apart by a frame (the RISKS §7.8 class). Lazy import: evaluate is the higher layer.
+    from project_amnesty.utils.train import rollout_with_contract  # noqa: PLC0415
+
+    codes_t, gen = rollout_with_contract(model, prefix, max_new_frames, prompt_frames)
+    codes = _as_ndarray(codes_t).astype(int)                # (B, 2, K, Tu), axis 1 = [self, user]
     batch = codes.shape[0]
+    n_gen = codes.shape[-1]
     self_list = [codes[b, 0, 0, :] for b in range(batch)]   # semantic level-0, self stream
     user_list = [codes[b, 1, 0, :] for b in range(batch)]   # semantic level-0, user stream
-    text = gen.get("text") if isinstance(gen, dict) else getattr(gen, "text", None)
-    if text is not None:
-        text_arr = _as_ndarray(text).astype(int)
-        text_arr = text_arr.reshape(batch, -1)
-        text_list = [text_arr[b] for b in range(batch)]
-    else:
-        text_list = [None] * batch
+
+    # The generated text stream lands on `sequences`; there is no `text` field, and looking for one
+    # returned None on every call -- which left `self_text=None` and silently dropped the text term
+    # from `_self_speech_mask`, exactly like the `_pad_token_ids` miss did.
+    #
+    # Slice with the SAME end-anchored window as `self_c` (`-(n_gen + 1):-1`), NOT `-n_gen:`. Text
+    # delay is 0 post-training (ARCH §5.0.2 / §5.4.2), so text frame t and self-audio frame t are the
+    # same absolute frame, and `_self_speech_mask` ORs the two elementwise (see its `[:n]` union) --
+    # index i of both terms MUST name the same frame. `-n_gen:` put the text one frame LATER than
+    # `self_c` at every index, so the text onset (which PINS the self-speech onset, §5.0.1) landed one
+    # frame early: a zero-gap clean switch (agent onset == user offset) read as gap -1 and got
+    # miscounted as an overlap -- the exact B3 class this file was hardened against. Still
+    # end-anchored, so an early EOS cannot bleed prompt tokens into the dialogue window.
+    text_arr = _as_ndarray(gen.sequences).astype(int).reshape(batch, -1)[:, -(n_gen + 1):-1]
+    text_list = [text_arr[b] for b in range(batch)]
     return self_list, user_list, text_list
 
 
@@ -657,35 +749,41 @@ def _depth_role_divergence(model) -> dict:
     how far the self-role output diverges from the user-role output. If the additive Depth role
     embedding is diluted under other loss pressure the two collapse to the same output (role
     ignored) -> the ARCH §5.4 fallback is to promote the shared projection to two role-specific
-    ones. Also reports the static cosine / L2 of `model.depth_role_emb` when present.
+    ones. Also reports the static cosine / L2 of the Depth role embedding when present.
     """
     import numpy as np  # noqa: PLC0415
     import torch  # noqa: PLC0415
 
-    n_codebooks = len(_audio_emb_tables(_require_model_attr(model, "audio_emb", "shared audio input embedding, ARCH §5.4.2")))
+    # The model speaks Moshi's signature, not this contract, so the forward goes through the
+    # shared adapter (train.py section 2b). Calling `model(input_ids=, audio_codes=)` directly
+    # does not merely fail -- passing labels to make `audio_logits` appear returns it shaped
+    # `(B * T, 2K, C)`, whose axis 1 is 2K, so a `shape[1] >= 2` check PASSES and the probe then
+    # compares assistant codebook 0 against assistant codebook 1 while reporting the number as
+    # self-vs-user role divergence.
+    from project_amnesty.utils.train import forward_with_contract  # noqa: PLC0415 (lazy)
+
+    n_codebooks = len(_audio_emb_tables(_audio_embeddings(model)))
     n_frames = 8
-    audio_codes = torch.zeros((1, n_codebooks, n_frames), dtype=torch.long)
+    # (1, 2, K, T) -- the ROLE AXIS is required. Identical content in both streams, so the only
+    # thing that can separate the two outputs is the role signal itself, which is the point.
+    audio_codes = torch.zeros((1, 2, n_codebooks, n_frames), dtype=torch.long)
     input_ids = torch.zeros((1, n_frames), dtype=torch.long)
     with torch.no_grad():
-        outputs = model(input_ids=input_ids, audio_codes=audio_codes)
-    audio_logits = getattr(outputs, "audio_logits", None)
-    if audio_logits is None and isinstance(outputs, dict):
-        audio_logits = outputs.get("audio_logits")
-    if audio_logits is None:
-        raise AttributeError(
-            "forward outputs must expose `audio_logits` (B, 2, K, T, C) for the Depth role "
-            "divergence probe (ARCH §5.0.3/§5.4)."
+        outputs = forward_with_contract(model, {"input_ids": input_ids, "audio_codes": audio_codes})
+    logits = _as_ndarray(outputs["audio_logits"])
+    # Exact, not `>= 2`: the loose check is what let the `(B * T, 2K, C)` layout through.
+    if logits.ndim != 5 or logits.shape[1] != 2:
+        raise ValueError(
+            f"audio_logits must be (B, 2, K, T, C) with the self/user role axis at dim 1; "
+            f"got {logits.shape}"
         )
-    logits = _as_ndarray(audio_logits)
-    if logits.ndim < 2 or logits.shape[1] < 2:
-        raise ValueError(f"audio_logits must have a self/user axis of size 2 at dim 1; got {logits.shape}")
     self_l = logits[:, 0, ...].ravel()
     user_l = logits[:, 1, ...].ravel()
     diff = float(np.linalg.norm(self_l - user_l))
     denom = float(np.linalg.norm(self_l) + np.linalg.norm(user_l) + 1e-8)
     batch_output_divergence = diff / denom  # matches train.py run_diagnostics' collapse metric
 
-    depth_role_emb = getattr(model, "depth_role_emb", None)
+    depth_role_emb, _ = _depth_role(model)
     if depth_role_emb is not None:
         dre = _as_ndarray(depth_role_emb)
         depth_role_cos = _vec_cosine(dre[0], dre[1]) if dre.shape[0] >= 2 else float("nan")
@@ -694,11 +792,20 @@ def _depth_role_divergence(model) -> dict:
         depth_role_cos = None
         depth_role_l2 = None
 
+    # The Depth role starts at the identity BY DESIGN (`RoleEmbedding`: additive mode initialises
+    # to zeros so a Moshi warm-start reproduces the teacher exactly at step 0). So a freshly
+    # warm-started checkpoint has divergence 0 and would trip the collapse alarm at Checkpoint A
+    # -- a false positive on the very checkpoint the alarm is first read. `depth_role_l2 == 0`
+    # separates "never trained" from "trained and collapsed"; `collapsed` is meaningless while it
+    # holds, and the caller must read this flag before the alarm.
+    role_is_at_init = depth_role_l2 is not None and depth_role_l2 == 0.0
+
     return {
         "batch_output_divergence": batch_output_divergence,   # normalized L2 self vs user (ARCH §5.4 ②)
         "self_user_output_cos": _vec_cosine(self_l, user_l),  # cosine of the two stream outputs
         "collapsed": bool(batch_output_divergence < 1e-3),    # role-collapse alarm -> split projection
-        "depth_role_cos": depth_role_cos,                     # static cos(depth_role_emb[0], [1])
+        "role_emb_is_init": bool(role_is_at_init),            # if True, `collapsed` says nothing
+        "depth_role_cos": depth_role_cos,                     # static cos of the two Depth role rows
         "depth_role_l2": depth_role_l2,
         "n_frames": n_frames,
     }
@@ -735,8 +842,16 @@ def _load_probe_set(probe_path: str):
 
 
 def _forward_prefix(model, prefix):
-    """Run one holdout prefix through the model forward (documented I/O contract)."""
-    return model(**prefix) if isinstance(prefix, dict) else model(prefix)
+    """Run one holdout prefix through the model forward (documented I/O contract).
+
+    `output_hidden_states` is forced on: `outputs.hidden_states` is `None` unless it is requested,
+    and the probe reads z_s off it (ARCH §5.0 eq.1). Without this every lookup in
+    `_turntaking_features` resolves to `None` and the probe raises on the first prefix. A prefix
+    payload that sets it itself wins, so a caller can still turn it off deliberately.
+    """
+    if isinstance(prefix, dict):
+        return model(**{"output_hidden_states": True, **prefix})
+    return model(prefix, output_hidden_states=True)
 
 
 def _turntaking_features(model, prefixes):
@@ -744,7 +859,13 @@ def _turntaking_features(model, prefixes):
 
     Uses the per-frame Temporal context vector z_s -- the representation the Depth turn-taking
     prediction reads (ARCH §5.0 eq.1) -- exposed as `outputs.hidden_states` (last layer) or
-    `outputs.z`, mean-pooled over the frame axis. Raises until the models/ forward body lands.
+    `outputs.z`, mean-pooled over the frame axis.
+
+    `hidden_states[-1]` is preferred over `last_hidden_state` deliberately, even though they are
+    equal on the label-free path: when a prefix carries both `text_labels` and `audio_labels`,
+    Moshi reshapes `last_hidden_state` to `(B * T, 1, H)` while `hidden_states[-1]` stays
+    `(B, T, H)`. The pooling below is shape-invariant, so that difference would not raise -- it
+    would silently pool a different thing.
     """
     import numpy as np  # noqa: PLC0415
     import torch  # noqa: PLC0415
@@ -758,6 +879,10 @@ def _turntaking_features(model, prefixes):
                 hidden = outputs.get("hidden_states") if isinstance(outputs, dict) else None
             if hidden is None:
                 hidden = getattr(outputs, "z", None)
+            if hidden is None:
+                # Always populated, and equal to hidden_states[-1] on this path -- so a prefix
+                # that declined the flag still probes rather than aborting the whole gate.
+                hidden = getattr(outputs, "last_hidden_state", None)
             if hidden is None:
                 raise AttributeError(
                     "forward outputs expose neither `hidden_states` nor `z`; the turn-taking causal "
@@ -950,9 +1075,15 @@ def eval_mechanism(ckpt: str, split: str = "probe") -> dict:
     # load_configs() reads configs/data/loader.yaml + tokens.yaml -> (DataConfig, LoaderConfig,
     # mix_cfg). For split="probe" build_dataloader uses a deterministic per-group sampler and
     # does NOT need mix_cfg (only training does); it returns a LoaderBundle. Pass a
-    # KDCollatorConfig seeded with the config's token ids so the collator has them (the default
-    # DelayConfig is fine -- delay does not affect the probe's mechanism metric positions).
-    from project_amnesty.datasets.collator import KDCollatorConfig  # noqa: PLC0415 (lazy)
+    # KDCollatorConfig seeded with the config's token ids so the collator has them.
+    #
+    # The delay is set EXPLICITLY rather than left to `DelayConfig`'s default. That default is
+    # `acoustic_delay=2`, which ARCH §5.0.2 (Table 1) assigns to PRE-training; post-training --
+    # every checkpoint a gate ever sees, since A/B/C run after phases 1/2/3 -- is acoustic 1 /
+    # text 0, and that is what `train.py` DataArgs uses. Inheriting the default meant every
+    # evaluation conditioned the model on a codebook stagger it was not trained under, which
+    # changes the generated distribution and therefore every timing metric, silently.
+    from project_amnesty.datasets.collator import DelayConfig, KDCollatorConfig  # noqa: PLC0415 (lazy)
     from project_amnesty.datasets.loader import build_dataloader, load_configs  # noqa: PLC0415 (lazy)
 
     data_cfg, loader_cfg, _mix = load_configs()
@@ -960,18 +1091,26 @@ def eval_mechanism(ckpt: str, split: str = "probe") -> dict:
         data_cfg=data_cfg,
         loader_cfg=loader_cfg,
         split="probe",
-        collator_cfg=KDCollatorConfig(tokens=data_cfg.tokens),
+        collator_cfg=KDCollatorConfig(
+            tokens=data_cfg.tokens,
+            delay=DelayConfig(acoustic_delay=1, text_delay_frames=0),  # ARCH §5.0.2 post-training
+        ),
     )
 
     max_new_frames = 750  # 60 s at 12.5 Hz (matches the training context cap, train.py DataArgs)
-    backchannel_max = max(1, int(round(0.6 * FRAME_RATE_HZ)))  # ~0.6 s short burst -> backchannel
-    pad_ids = _pad_token_ids()
+    backchannel_max = BACKCHANNEL_MAX_FRAMES  # surfaced module constant; NOT doc-specified (see its def)
+    pad_ids = _pad_token_ids(data_cfg.tokens)
+    # Semantic silence is a config constant, not a per-dialogue quantity -- resolve it once from the
+    # validated bank (B4: no cwd-relative file read, no modal fallback).
+    silence = _silence_codes(data_cfg.tokens.silence_bank)
 
     # Accumulators over every simulated dialogue.
     total_frames = 0
     overlap_frames = 0
     union_frames = 0
-    resp_gaps_s: list = []       # positive-gap turn latencies (seconds), both directions
+    n_dialogues = 0              # simulated dialogues actually measured (RISKS §7.4 visibility)
+    n_skipped_batches = 0        # text_anchor batches skipped (no audio_codes) -- U2 visibility
+    resp_gaps_s: list = []       # non-negative-gap turn latencies (seconds), both directions
     all_gaps_s: list = []        # signed transition gaps (seconds) for turn_switch_timing
     n_user_turns = 0
     n_bargein = 0
@@ -980,9 +1119,16 @@ def eval_mechanism(ckpt: str, split: str = "probe") -> dict:
 
     # Iterate the bundle's DataLoader (a bare `for batch in bundle` would be wrong).
     for batch in bundle.loader:
+        # The probe split carries text_anchor micro-batches alongside the audio ones (they go
+        # through TextAnchorCollator, plan §5.4). A text_anchor batch has T=0 and no codebook axis
+        # -- no `audio_codes` key at all -- so it cannot seed a simulated dialogue and must be
+        # skipped rather than reaching `generate`.
+        if "audio_codes" not in batch:
+            n_skipped_batches += 1   # count the skip so "all skipped" != "measured and got 0" (U2)
+            continue
         self_streams, user_streams, text_streams = _simulate_dialogue(model, batch, max_new_frames)
         for self_sem, user_sem, self_text in zip(self_streams, user_streams, text_streams):
-            silence = _silence_codes([self_sem, user_sem])
+            n_dialogues += 1
             self_speech = _self_speech_mask(self_text, self_sem, silence, pad_ids)
             user_speech = _speech_mask_from_semantic(user_sem, silence)
             frames = int(min(self_speech.shape[0], user_speech.shape[0]))
@@ -1001,7 +1147,10 @@ def eval_mechanism(ckpt: str, split: str = "probe") -> dict:
             gaps = _response_gaps(user_runs, self_runs) + _response_gaps(self_runs, user_runs)
             for g in gaps:
                 all_gaps_s.append(g / FRAME_RATE_HZ)
-                if g > 0:
+                # g==0 reclassified from overlap to clean switch (zero-silence adjacent turn;
+                # `_runs` end is exclusive). Makes the whole file consistent -- overlap_rate/
+                # bargein already exclude g==0. Include g>=0 (not >0) as a response latency.
+                if g >= 0:
                     resp_gaps_s.append(g / FRAME_RATE_HZ)
 
             # barge-in / backchannel classification on self runs vs the user speech mask.
@@ -1011,18 +1160,34 @@ def eval_mechanism(ckpt: str, split: str = "probe") -> dict:
             bargein_frames.append(np.where(bmask[:frames])[0].tolist())
 
     response_latency = float(np.mean(resp_gaps_s)) if resp_gaps_s else float("nan")
-    overlap_rate = float(overlap_frames / union_frames) if union_frames else 0.0
-    backchannel_rate = float(n_backchannel / n_user_turns) if n_user_turns else 0.0
-    bargein_rate = float(n_bargein / n_user_turns) if n_user_turns else 0.0
+    # Zero denominator = nothing to measure against, NOT a perfect score. A silence/speech
+    # collapse (RISKS §7.4: pure per-frame KD can converge to "always predict silence") yields no
+    # union speech / no user turns; reporting 0.0 there reads as a FLAWLESS run (no overlap, no
+    # barge-in) and hides the collapse §7.4 wants VISIBLE. Return nan instead -- same precedent as
+    # `_kfold_heldout_accuracy` ("nan, never a passing 1.0, when it cannot measure"). A real
+    # measured 0.0 (nonzero denominator, no events) stays 0.0: the non-zero-denominator math below
+    # is unchanged.
+    overlap_rate = float(overlap_frames / union_frames) if union_frames else float("nan")
+    backchannel_rate = float(n_backchannel / n_user_turns) if n_user_turns else float("nan")
+    bargein_rate = float(n_bargein / n_user_turns) if n_user_turns else float("nan")
 
     return {
         "response_latency": response_latency,      # seconds: partner utterance end -> response onset
         "overlap_rate": overlap_rate,              # simultaneous-speech frames / union speech frames
         "backchannel_rate": backchannel_rate,      # short backchannels per user turn
         "bargein_rate": bargein_rate,              # interruptions per user turn
+        "backchannel_max_frames": BACKCHANNEL_MAX_FRAMES,  # classification cutoff (strict <; NOT doc-specified) -- travels with the rates it governs
         "turn_switch_timing": _timing_stats(all_gaps_s),  # transition-timing stats (EPAD-aligned, §5.0.1)
         "bargein_frame_mask_available": any(len(x) > 0 for x in bargein_frames),  # for §7.9 local
         "bargein_frame_mask": bargein_frames,      # per-dialogue barge-in frame indices (§7.9 target)
+        # Raw counts so a nan rate is legible as "nothing was measured" vs a real zero, and a
+        # fully-skipped run is distinguishable from a measured-and-got-0 run (RISKS §7.4; U2). These
+        # SURFACE the denominators the rates divide by -- not a threshold, not a doc-specified value.
+        "n_dialogues": n_dialogues,                # simulated dialogues measured
+        "n_user_turns": n_user_turns,              # denominator of backchannel_rate / bargein_rate
+        "total_frames": total_frames,              # frames measured across all dialogues
+        "union_frames": union_frames,              # denominator of overlap_rate
+        "n_skipped_batches": n_skipped_batches,    # text_anchor batches skipped (no audio_codes)
         "split": split,
     }
 
@@ -1070,10 +1235,11 @@ def probe_representations(
     Args:
         ckpt: path to the checkpoint under evaluation. (The probe always uses the
             holdout prefixes, RISKS §1.)
-        moshi_ckpt: Moshi warm-start source whose user-side tables (emb.8~15, §5.4.2)
-            are the initialization the user-channel embedding shift is measured against
-            (RISKS §3). Loaded exactly like tools/inspect_moshi_weights.py. Default matches
-            utils/train.py's ModelArgs.moshi_ckpt ("kmhf/hf-moshiko").
+        moshi_ckpt: Moshi warm-start source whose user-side tables (§5.4.2) are the
+            initialization the user-channel embedding shift is measured against (RISKS §3).
+            Read via `utils.warm_start_haan.moshi_audio_tables`, the same function the warm-start uses,
+            so the baseline is the model's actual init. Default matches utils/train.py's
+            ModelArgs.moshi_ckpt ("kmhf/hf-moshiko").
         probe_path: path to the turn-taking causal-probe holdout set (CURRICULUM §0,
             never trained on -- RISKS §1). When None the probe-score keys are returned as
             NaN / None (the probe set was not provided).
@@ -1093,11 +1259,13 @@ def probe_representations(
     model = _load_model(ckpt)
 
     # --- (1) role-vector separability (ARCH §3.5·§3.5.1·§5.4) --------------------------
-    role_emb = _require_model_attr(model, "role_emb", "(2, D) additive self/user Role Token, ARCH §3.3")
-    audio_emb = _require_model_attr(model, "audio_emb", "shared audio input embedding, ARCH §5.4.2")
+    role_emb, role_mode = _temporal_role(model)
+    audio_emb = _audio_embeddings(model)
     role_arr = _as_ndarray(role_emb)
     if role_arr.shape[0] < 2:
-        raise ValueError(f"model.role_emb must have 2 rows (self/user); got shape {role_arr.shape}")
+        raise ValueError(
+            f"model.role_embedding must have 2 rows (self/user); got shape {role_arr.shape}"
+        )
     role0, role1 = role_arr[0].ravel(), role_arr[1].ravel()
 
     cur_tables = _audio_emb_tables(audio_emb)  # list of (C, D), one per codebook
@@ -1110,9 +1278,9 @@ def probe_representations(
     # role_cos_acoustic_by_level exposes every acoustic level 1..K-1 so that monotonic trend (the
     # §3.5.1 confound check) stays visible in the report.
     if role0.shape[-1] == cur_tables[0].shape[-1]:
-        role_cos_semantic = _role_row_cosine(cur_tables[0], role0, role1)
+        role_cos_semantic = _role_row_cosine(cur_tables[0], role0, role1, role_mode)
         role_cos_acoustic_by_level = [
-            _role_row_cosine(cur_tables[k], role0, role1) for k in range(1, n_codebooks)
+            _role_row_cosine(cur_tables[k], role0, role1, role_mode) for k in range(1, n_codebooks)
         ]
         # PRIMARY acoustic metric = codebook 1 (the baseline level), NOT the K-1 mean.
         role_cos_acoustic = role_cos_acoustic_by_level[0] if role_cos_acoustic_by_level else float("nan")
@@ -1125,17 +1293,25 @@ def probe_representations(
         role_cos_acoustic_by_level = [raw]
 
     # --- (2) user-channel embedding shift vs the Moshi init (RISKS §3, ARCH §5.4.2) ----
-    # Load the Moshi user-side tables (emb.8~15) exactly like tools/inspect_moshi_weights.py --
-    # this is the initialization the shared audio embedding was copied from (§5.4.2).
-    from project_amnesty.tools.inspect_moshi_weights import load_embedding_tables  # noqa: PLC0415
+    # This must be the SAME tensors the warm-start actually copied in, or the "how far has it
+    # moved" number is measured against an initialization the model never had. So it goes through
+    # `utils.warm_start_haan`'s own `moshi_audio_tables` -- what `warm_start_from_moshi` uses.
+    #
+    # (It previously called tools/inspect_moshi_weights.load_embedding_tables, which reads the
+    # ORIGINAL Kyutai layout: `emb.<i>.weight` inside a single `model.safetensors`. The default
+    # `moshi_ckpt` here is the HF conversion `kmhf/hf-moshiko`, which names them
+    # `embed_tokens.<i>.weight` and ships 4 shards with no `model.safetensors` at all -- so that
+    # call could only ever have raised.)
+    from project_amnesty.utils.warm_start_haan import moshi_audio_tables  # noqa: PLC0415 (lazy)
 
-    moshi_tables = load_embedding_tables(ckpt=moshi_ckpt, dep_q=n_codebooks)  # {0..2K-1}; user = [K, 2K)
-    init_tables = [moshi_tables[n_codebooks + k] for k in range(n_codebooks)]
+    init_tables = [
+        _as_ndarray(t) for t in moshi_audio_tables(moshi_ckpt, num_codebooks=n_codebooks, side="user")
+    ]
     l2s, coss = [], []
     for cur, init in zip(cur_tables, init_tables):
         if cur.shape[-1] != init.shape[-1]:
             raise ValueError(
-                f"audio_emb dim {cur.shape[-1]} != Moshi init dim {init.shape[-1]} "
+                f"embed_tokens dim {cur.shape[-1]} != Moshi init dim {init.shape[-1]} "
                 f"(cannot measure the user-channel shift, RISKS §3)."
             )
         n = min(cur.shape[0], init.shape[0])  # compare the real audio-code rows shared by both
@@ -1175,7 +1351,7 @@ def probe_representations(
 # are the TODO parts inside the sub-evaluations above).
 # ---------------------------------------------------------------------------
 
-def run_checkpoint(ckpt: str, tag: str) -> dict:
+def run_checkpoint(ckpt: str, tag: str, probe_path: "str | None" = None) -> dict:
     """Run the judgment bundle for checkpoint tag A/B/C and assemble a report dict.
 
     Which sub-evaluations each tag calls (CURRICULUM §2 / RISKS §1·§2·§4):
@@ -1194,6 +1370,13 @@ def run_checkpoint(ckpt: str, tag: str) -> dict:
     Args:
         ckpt: checkpoint path.
         tag: "A" | "B" | "C".
+        probe_path: optional path to the turn-taking causal-probe holdout, threaded straight
+            into probe_representations. CURRICULUM §0 prepares this set ("한국어 오디오 프리픽스
+            (학습엔 미사용, 프로빙 전용)" -- Korean audio prefix, training-unused, probing-only),
+            and RISKS §1 measures it by causal probing ("Turn-taking 관련 내부 표현이 언어에
+            무관하게 활성화되는지 causal probing으로 직접 측정"). Passing it makes Checkpoint A's
+            turn-taking probe decidable. When None the probe-score keys stay NaN/None (probe set
+            not provided) -- behaviour is UNCHANGED, never a fabricated number.
 
     Returns:
         dict -- the report, with keys:
@@ -1218,14 +1401,26 @@ def run_checkpoint(ckpt: str, tag: str) -> dict:
     }
 
     # A/B/C all run the representation probe (early signal at A; rise/collapse checks at B/C).
-    report["probe"] = probe_representations(ckpt)
+    # probe_path threads the CURRICULUM §0 causal-probe holdout through; when None the turn-taking
+    # probe score stays NaN (probe set absent), so this only makes the path REACHABLE -- it does
+    # not fabricate a result (RISKS §1, CURRICULUM §0).
+    report["probe"] = probe_representations(ckpt, probe_path=probe_path)
 
     # B and C add content and mechanism -- stored under separate keys and NEVER summed
     # into a single scalar (RISKS §4). At B these back the English held-out interference
     # tracking (RISKS §2); at C they back the Korean emergence judgment.
     if tag in ("B", "C"):
-        report["content"] = eval_content(ckpt, split="probe")
-        report["mechanism"] = eval_mechanism(ckpt, split="probe")
+        # Each half is attempted INDEPENDENTLY. RISKS §4 requires mechanism and content to be
+        # separable precisely so a partial failure can be attributed, and this function's own
+        # docstring promises that -- but a bare sequence of calls broke it: `eval_content` raises
+        # unconditionally (no Korean ASR yet), so the fully-implemented `eval_mechanism` was
+        # unreachable at the only two tags that use it. A failure is recorded under its own key
+        # and never merged with the other half.
+        for key, run in (("content", eval_content), ("mechanism", eval_mechanism)):
+            try:
+                report[key] = run(ckpt, split="probe")
+            except Exception as exc:  # noqa: BLE001 -- the failure IS the result for this key
+                report[key] = {"error": f"{type(exc).__name__}: {exc}"}
 
     return report
 
@@ -1250,6 +1445,14 @@ def main() -> None:
         default="probe",
         help="only the probe holdout is allowed -- no training exposure (RISKS §1, CURRICULUM §0)",
     )
+    parser.add_argument(
+        "--probe-path",
+        default=None,
+        help="path to the turn-taking causal-probe holdout set (CURRICULUM §0 prepares the Korean "
+        "audio prefix, training-unused / probing-only; RISKS §1). Threaded into "
+        "probe_representations so Checkpoint A's turn-taking probe is decidable. Omit = probe "
+        "score stays NaN (behaviour unchanged, not a fabricated number).",
+    )
     args = parser.parse_args()
 
     # Enforce the holdout-only rule explicitly (RISKS §1) rather than relying on choices,
@@ -1263,7 +1466,7 @@ def main() -> None:
     # model-dependent sub-evaluations until the models/ forward lands (datasets/ is already real). The report
     # keeps content / mechanism / probing under separate keys -- never summed into one
     # scalar (RISKS §4).
-    report = run_checkpoint(args.ckpt, args.checkpoint_tag)
+    report = run_checkpoint(args.ckpt, args.checkpoint_tag, probe_path=args.probe_path)
     print(report)
 
 

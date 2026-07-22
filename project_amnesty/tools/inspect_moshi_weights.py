@@ -89,7 +89,7 @@ class CodebookAudit:
     codebook: int
     kind: str                # "semantic" (k == 0) or "acoustic" (k >= 1)
     row_cosine: float        # mean_i cos(self_i, user_i)
-    offset_share: float      # variance of D = user - self explained by the constant mean(D)
+    offset_share: float      # energy of D = user - self explained by the constant mean(D)
     residual_share: float    # 1 - offset_share (per-code, role-specific part)
     n_codes: int             # number of code rows actually compared
 
@@ -120,8 +120,12 @@ def offset_decomposition(self_tab: np.ndarray, user_tab: np.ndarray) -> tuple[fl
     d = user_tab.astype(np.float64) - self_tab.astype(np.float64)
     ss_total = float((d * d).sum())
     if ss_total == 0.0:
-        # Identical tables: the whole (zero) difference is trivially "constant".
-        return 1.0, 0.0
+        # self == user: there is no role difference to decompose. Returning 1.0 here
+        # renders as "a constant offset explains 100% of it" -- the strongest form of
+        # this tool's verdict -- when the truth is the opposite: the offset vector is
+        # itself zero and there is no role signal at all. Report it as undefined so a
+        # degenerate input cannot masquerade as the headline finding.
+        return float("nan"), float("nan")
     c = d.mean(axis=0)
     resid = d - c
     ss_resid = float((resid * resid).sum())
@@ -147,6 +151,20 @@ def compare_tables(
             )
         lo = row_offset
         hi = row_offset + audio_card
+        # numpy clamps an out-of-range slice rather than raising, so without this the
+        # tool audits a row set nobody asked for. A `row_offset` at or past the end
+        # yields an EMPTY slice for both tables, whose zero difference reads back as
+        # offset_share=1.0 with a NaN cosine -- the exact inverse of this tool's
+        # finding, written out as a legitimate-looking report. A too-large
+        # `audio_card` silently folds in the trailing special-token rows instead.
+        for side, idx in (("self", self_idx), ("user", user_idx)):
+            rows = tables[idx].shape[0]
+            if lo < 0 or hi > rows:
+                raise ValueError(
+                    f"codebook {k}: {side} row window [{lo}:{hi}] is out of range for a "
+                    f"{rows}-row table (row_offset={row_offset}, audio_card={audio_card}). "
+                    "Slicing would be clamped and the audit would run on the wrong rows."
+                )
         s = tables[self_idx][lo:hi]
         u = tables[user_idx][lo:hi]
         if s.shape != u.shape:
@@ -173,11 +191,17 @@ def acoustic_monotonicity(results: list[CodebookAudit]) -> dict[str, Any]:
     """
     acoustic = [r for r in results if r.kind == "acoustic"]
     cosines = [r.row_cosine for r in acoustic]
-    monotonic = all(b >= a for a, b in zip(cosines, cosines[1:]))
+    # `all()` over an empty pairing is True, so fewer than two acoustic levels used to
+    # report the confound test as PASSED with no data behind it (dep_q<=2 gave a
+    # confident "yes" off zero comparisons). An undecided verdict is the honest answer.
+    if len(cosines) < 2:
+        monotonic = None
+    else:
+        monotonic = bool(all(b >= a for a, b in zip(cosines, cosines[1:])))
     return {
         "levels": [r.codebook for r in acoustic],
         "cosines": cosines,
-        "monotonic_increasing": bool(monotonic),
+        "monotonic_increasing": monotonic,
     }
 
 
@@ -264,16 +288,19 @@ def format_report(results: list[CodebookAudit], mono: dict[str, Any]) -> str:
             f"{r.codebook:>8} | {r.kind:<8} | {r.row_cosine:>10.3f} | "
             f"{r.offset_share * 100:>11.2f}% | {r.residual_share * 100:>13.2f}%"
         )
-    verdict = "yes" if mono["monotonic_increasing"] else "no"
+    decided = mono["monotonic_increasing"]
+    verdict = "n/a (needs >= 2 acoustic levels)" if decided is None else ("yes" if decided else "no")
     lines.append("")
     lines.append(
-        f"acoustic cosine monotonic 1->{results[-1].codebook}: {verdict} "
+        # "non-decreasing", not "increasing": the test is `>=`, so a flat profile counts.
+        f"acoustic cosine non-decreasing 1->{results[-1].codebook}: {verdict} "
         f"(levels {mono['levels']} -> {[round(c, 3) for c in mono['cosines']]})"
     )
     return "\n".join(lines)
 
 
-def write_payload(results: list[CodebookAudit], mono: dict[str, Any], source: str, out: Path) -> dict[str, Any]:
+def write_payload(results: list[CodebookAudit], mono: dict[str, Any], source: str, out: Path,
+                  *, force: bool = False) -> dict[str, Any]:
     """Persist the audit as JSON (per-codebook rows + monotonicity + provenance)."""
     payload = {
         "source": source,
@@ -282,8 +309,18 @@ def write_payload(results: list[CodebookAudit], mono: dict[str, Any], source: st
         "codebooks": [asdict(r) for r in results],
         "acoustic_monotonicity": mono,
     }
+    if out.exists() and not force:
+        raise FileExistsError(
+            f"{out} already exists. A --dry-run audit carries synthetic numbers, so silently "
+            "replacing a real audit with one would be worse than refusing. Pass --force to "
+            "overwrite deliberately."
+        )
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(payload, indent=2, ensure_ascii=False))
+    # Atomic: serialize to a sibling temp file and rename, so an interrupted run cannot
+    # leave a truncated audit where a valid one used to be.
+    tmp = out.with_name(out.name + ".tmp")
+    tmp.write_text(json.dumps(payload, indent=2, ensure_ascii=False))
+    tmp.replace(out)
     return payload
 
 
@@ -320,8 +357,16 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--revision", default=None, help="checkpoint revision / branch (hub only)")
     p.add_argument("--dep-q", type=int, default=DEFAULT_DEP_Q, help="self codebooks; user tables are emb.[dep_q..2*dep_q)")
     p.add_argument("--audio-card", type=int, default=DEFAULT_AUDIO_CARD, help="code rows compared per table")
-    p.add_argument("--row-offset", type=int, default=0, help="first code row to compare (skip leading special tokens)")
+    # NOT "skip leading special tokens": the real codes are the LEADING rows and the
+    # special tokens trail them (see DEFAULT_AUDIO_CARD), so the default 0 is already
+    # the start of the real-code block. The old help text pointed the opposite way.
+    p.add_argument("--row-offset", type=int, default=0,
+                   help="first code row to compare; 0 is the start of the real-code block "
+                        "(special tokens are the trailing rows, so this is rarely nonzero)")
     p.add_argument("--out", default=None, help="optional JSON output path for the audit")
+    p.add_argument("--force", action="store_true",
+                   help="overwrite --out if it already exists (a --dry-run audit is synthetic, so "
+                        "replacing a real one must be deliberate)")
     p.add_argument("--dry-run", action="store_true", help="use synthetic tables (no download); smoke-test only")
     return p.parse_args(argv)
 
@@ -340,7 +385,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"source: {source}")
     print(format_report(results, mono))
     if args.out is not None:
-        payload = write_payload(results, mono, source, Path(args.out))
+        payload = write_payload(results, mono, source, Path(args.out), force=args.force)
         print(f"\nwrote {len(payload['codebooks'])} codebook audits -> {args.out}")
     return 0
 

@@ -336,27 +336,63 @@ def run_phase(name: str, resume: str | None, out_dir: str = "checkpoints") -> st
     return _latest_step_ckpt(phase_dir) or phase_dir
 
 
-def gate_checkpoint(name: str, ckpt: str) -> dict:
+def gate_checkpoint(name: str, ckpt: str, probe_path: str | None = None) -> dict:
     """Post-phase checkpoint A/B/C gate. Delegates to the evaluate entry point.
 
-    If CHECKPOINT_GATE[name] is a tag (A/B/C), run evaluate.run_checkpoint(ckpt, tag)
+    If CHECKPOINT_GATE[name] is a tag (A/B/C), run evaluate.run_checkpoint(ckpt, tag, probe_path)
     (which keeps mechanism vs content strictly separated) and wrap its report with a pass/fail
     verdict deciding whether the next phase may start. If the phase has no gate (None), pass.
+
+    `probe_path` is forwarded straight to evaluate.run_checkpoint -> probe_representations: it is
+    the turn-taking causal-probe holdout (CURRICULUM §0, RISKS §1) that makes the Checkpoint A
+    turn-taking probe decidable. When None the probe score stays NaN (probe set not provided) --
+    behaviour is UNCHANGED; forwarding it only makes that path reachable.
 
     Returns a dict that always carries `passed` (bool), `phase`, and `gate`; the raw evaluate
     report — when produced — is preserved under `report` without collapsing mechanism/content
     metrics into a single scalar (RISKS §4).
+
+    **A missing verdict is NOT a pass.** `run_checkpoint` currently reports metrics without
+    deciding anything — `"passed"` appears nowhere in evaluate.py, and no thresholds exist
+    (TRAINING_CURRICULUM §2 states the judgment questions but no numeric criteria). The previous
+    default of `True` meant every gate passed unconditionally while reporting that it had run,
+    which is the failure mode gating exists to prevent. Defaulting to `False` instead stops the
+    curriculum at the gate and asks for a human read of the report, which is what the docs
+    actually specify today.
     """
     tag = CHECKPOINT_GATE.get(name)
     if tag is None:
         return {"phase": name, "gate": None, "passed": True}
 
     evaluate = _evaluate_module()
-    report = evaluate.run_checkpoint(ckpt, tag)
-    # evaluate.run_checkpoint returns a judgment bundle; treat a missing/true `passed` as a
-    # pass so the loop can advance, and an explicit False as a stop.
-    passed = bool(report.get("passed", True)) if isinstance(report, dict) else True
-    return {"phase": name, "gate": tag, "ckpt": ckpt, "passed": passed, "report": report}
+    report = evaluate.run_checkpoint(ckpt, tag, probe_path=probe_path)
+    # TODO(F4 -- A/B/C gate thresholds): decide the numeric pass criteria and set `passed` here.
+    # TRAINING_CURRICULUM §2 states the judgment QUESTIONS per gate but gives no numbers, so nothing
+    # can compute a verdict today and every gate stops for a human read (the branch below). To close:
+    #   1. Fix per-tag thresholds over the metrics `run_checkpoint` already returns -- e.g. A: the
+    #      mechanism turn-taking bands (`overlap_rate`, `response_latency`) plus
+    #      `probe_is_shortcut` is False; B: interference drop against the A baseline; C: Korean
+    #      multi-turn emergence (content side, kept separate per RISKS §4).
+    #   2. Keep them in ONE table (a per-tag dict here or in configs/), never inline per call site.
+    #   3. Let that comparison set `passed`; keep the None -> False default for anything unjudged.
+    # Until then the default below is deliberate: undecided STOPS the curriculum, never passes it.
+    verdict = report.get("passed") if isinstance(report, dict) else None
+    undecided = verdict is None
+    if undecided:
+        print(
+            f"[gate {tag}] {name}: the evaluation reported metrics but no verdict, so the run stops "
+            f"here. Read the report and re-launch the next phase explicitly once you have judged it "
+            f"(TRAINING_CURRICULUM §2). Checkpoint: {ckpt}",
+            flush=True,
+        )
+    return {
+        "phase": name,
+        "gate": tag,
+        "ckpt": ckpt,
+        "passed": bool(verdict),   # None -> False: no verdict is not a pass
+        "undecided": undecided,    # distinguishes "judged and failed" from "never judged"
+        "report": report,
+    }
 
 
 def run(plan: RunPlan) -> list[dict]:

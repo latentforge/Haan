@@ -82,9 +82,9 @@ from pathlib import Path
 
 import numpy as np
 
-# Mirrors of data_pipeline.schema, imported rather than restated so a codec swap
+# Mirrors of project_amnesty.datasets.schema, imported rather than restated so a codec swap
 # cannot leave this tool writing an 8-entry file for a 16-codebook model.
-from data_pipeline.schema import CODEBOOK_SIZE, FRAME_RATE_HZ, NUM_CODEBOOKS, SAMPLE_RATE
+from project_amnesty.datasets.schema import CODEBOOK_SIZE, FRAME_RATE_HZ, NUM_CODEBOOKS, SAMPLE_RATE
 
 __all__ = [
     "ProbeParams",
@@ -97,7 +97,7 @@ __all__ = [
     "main",
 ]
 
-# The corpus is baked with this checkpoint (data_pipeline/datasets/mixins.py).
+# The corpus is baked with this checkpoint (project_amnesty/datasets/mixins.py).
 # Deriving silence from a different one is the exact mismatch mimi_ckpt_id exists
 # to catch, so it is a flag, not a constant, and it is recorded in the output.
 DEFAULT_MIMI_CKPT = "kmhf/hf-moshiko"  # HF conversion; the moshi package is not installed
@@ -129,7 +129,17 @@ class ProbeParams:
     def __post_init__(self) -> None:
         assert self.seconds > 0, "probe must be non-empty"
         assert self.sample_rate > 0
-        assert self.trim_frames >= 0
+        # `raise`, not `assert`: a NEGATIVE trim is the one bad value here that stays quiet. It
+        # turns `trim_edges`'s `codes[:, trim : T - trim]` into a clamped slice that keeps only the
+        # tail transient -- precisely the frames trimming exists to discard -- and the run then
+        # writes that as the shipped bank and exits 0. `python -O` strips asserts, so under it the
+        # committed `configs/data/mimi_silence.json` would be replaced by a corrupt bank silently.
+        if self.trim_frames < 0:
+            raise ValueError(
+                f"`trim_frames={self.trim_frames}` must be non-negative. A negative trim does not "
+                "widen the probe -- it slices it down to the edge transient that trimming is meant "
+                "to remove, and the resulting bank is wrong without failing."
+            )
         assert 0.0 < self.min_modal_share <= 1.0
         # Trimming both edges must leave something to take a mode over.
         n_frames = int(self.seconds * FRAME_RATE_HZ)
@@ -179,7 +189,14 @@ def trim_edges(codes: np.ndarray, trim: int) -> np.ndarray:
     """
     codes = np.asarray(codes)
     assert codes.ndim == 2, f"expected (K, T) codes, got shape {codes.shape}"
-    assert trim >= 0, f"trim must be non-negative, got {trim}"
+    # `raise`, not `assert`, for the same reason as `ProbeParams.__post_init__`: a negative trim
+    # silently returns the edge transient instead of the probe body, and `python -O` would drop an
+    # assert here. The `ndim` check above stays an assert -- that catches a caller passing junk.
+    if trim < 0:
+        raise ValueError(
+            f"trim must be non-negative, got {trim}. A negative trim clamps the slice to the edge "
+            "frames this function exists to discard, rather than widening the probe."
+        )
     K, T = codes.shape
     assert T > 2 * trim, (
         f"cannot trim {trim} frames from each end of a {T}-frame probe "
@@ -196,16 +213,21 @@ def codebook_modes(
     `share` is the fraction of frames equal to the mode -- the number step 4
     thresholds on. Ties go to the lowest code id (argmax on bincount), which is
     irrelevant in the passing case (share > 0.9 cannot tie) and unreached in the
-    failing case because the assert fires first.
+    failing case because the range check fires first.
     """
     codes = np.asarray(codes)
     assert codes.ndim == 2, f"expected (K, T) codes, got shape {codes.shape}"
     K, T = codes.shape
     assert T > 0, "no frames to take a mode over"
-    assert codes.min() >= 0 and codes.max() < codebook_size, (
-        f"codes out of range [0, {codebook_size}): "
-        f"observed [{int(codes.min())}, {int(codes.max())}]"
-    )
+    # `raise`, not `assert`: this validates DATA the codec produced, and `python -O`
+    # strips asserts -- an out-of-range code would then reach the shipped bank silently.
+    # The two shape checks above stay asserts: those catch a caller passing junk, not
+    # a codec producing it.
+    if not (codes.min() >= 0 and codes.max() < codebook_size):
+        raise ValueError(
+            f"codes out of range [0, {codebook_size}): "
+            f"observed [{int(codes.min())}, {int(codes.max())}]"
+        )
 
     modes = np.empty(K, dtype=np.int64)
     shares = np.empty(K, dtype=np.float64)
@@ -275,7 +297,7 @@ def assert_modal_shares(
 def load_mimi(ckpt_id: str = DEFAULT_MIMI_CKPT, device: str = "cpu"):
     """The frozen Mimi, pulled out of the HF Moshi checkpoint as a standalone model.
 
-    NOT the `moshi` package. data_pipeline/datasets/mixins.py reaches for
+    NOT the `moshi` package. project_amnesty/datasets/mixins.py reaches for
     `moshi.models.loaders`, but that package is not installed here and that code
     path has never run (there are no artifacts under data/). The repo's working
     codec access -- project_amnesty/datasets/scenarios/scenario_run.py -- goes
@@ -292,18 +314,22 @@ def load_mimi(ckpt_id: str = DEFAULT_MIMI_CKPT, device: str = "cpu"):
     from transformers import MimiConfig, MimiModel
 
     cfg_path = hf_hub_download(ckpt_id, "config.json")
-    audio_cfg = json.load(open(cfg_path)).get("audio_encoder_config")
-    assert audio_cfg is not None, (
-        f"{ckpt_id}/config.json has no audio_encoder_config; this is not an HF "
-        f"Moshi checkpoint. Pass --ckpt-id kmhf/hf-moshiko."
-    )
+    with open(cfg_path) as f:
+        audio_cfg = json.load(f).get("audio_encoder_config")
+    if audio_cfg is None:
+        raise ValueError(
+            f"{ckpt_id}/config.json has no audio_encoder_config; this is not an HF "
+            f"Moshi checkpoint. Pass --ckpt-id kmhf/hf-moshiko."
+        )
     model = MimiModel(MimiConfig(**audio_cfg)).eval()
 
-    index = json.load(open(hf_hub_download(ckpt_id, "model.safetensors.index.json")))
+    with open(hf_hub_download(ckpt_id, "model.safetensors.index.json")) as f:
+        index = json.load(f)
     weight_map = index["weight_map"]
     prefix = "audio_encoder."
     shards = sorted({v for k, v in weight_map.items() if k.startswith(prefix)})
-    assert shards, f"no {prefix}* tensors in {ckpt_id}"
+    if not shards:
+        raise ValueError(f"no {prefix}* tensors in {ckpt_id}")
 
     state: dict[str, "torch.Tensor"] = {}
     for shard in shards:
@@ -313,11 +339,14 @@ def load_mimi(ckpt_id: str = DEFAULT_MIMI_CKPT, device: str = "cpu"):
 
     missing, unexpected = model.load_state_dict(state, strict=False)
     # Silence codes derived from a partially-loaded codec would be plausible and
-    # wrong, so refuse rather than warn.
-    assert not missing and not unexpected, (
-        f"Mimi state_dict mismatch for {ckpt_id}: "
-        f"{len(missing)} missing, {len(unexpected)} unexpected"
-    )
+    # wrong, so refuse rather than warn. `raise`, not `assert`: under `python -O` an
+    # assert here is stripped and the wrong-but-plausible bank is written silently,
+    # which is precisely the failure this guard exists to prevent.
+    if missing or unexpected:
+        raise ValueError(
+            f"Mimi state_dict mismatch for {ckpt_id}: "
+            f"{len(missing)} missing, {len(unexpected)} unexpected"
+        )
     return model.to(device)
 
 
@@ -329,12 +358,16 @@ def encode_probe(mimi, wav: np.ndarray, device: str = "cpu") -> np.ndarray:
     with torch.inference_mode():
         out = mimi.encode(x.to(device), num_quantizers=NUM_CODEBOOKS)
     codes = out.audio_codes if hasattr(out, "audio_codes") else out
-    assert codes.ndim == 3 and codes.shape[0] == 1, (
-        f"expected (1, K, T) from Mimi.encode, got {tuple(codes.shape)}"
-    )
-    assert codes.shape[1] == NUM_CODEBOOKS, (
-        f"expected {NUM_CODEBOOKS} codebooks, got {codes.shape[1]}"
-    )
+    # `raise`, not `assert`: what the real codec hands back is external data, and a
+    # check stripped by `python -O` would ship a wrong-shaped bank.
+    if codes.ndim != 3 or codes.shape[0] != 1:
+        raise ValueError(
+            f"expected (1, K, T) from Mimi.encode, got {tuple(codes.shape)}"
+        )
+    if codes.shape[1] != NUM_CODEBOOKS:
+        raise ValueError(
+            f"expected {NUM_CODEBOOKS} codebooks, got {codes.shape[1]}"
+        )
     return codes[0].to("cpu").numpy().astype(np.int64)
 
 
@@ -385,9 +418,10 @@ def derive_silence_codes(
     """
     params = params or ProbeParams()
     probes = synthesize_probes(params)
-    assert bank_probe in probes, (
-        f"bank_probe={bank_probe!r} is not one of {sorted(probes)}"
-    )
+    if bank_probe not in probes:
+        raise ValueError(
+            f"bank_probe={bank_probe!r} is not one of {sorted(probes)}"
+        )
 
     if encode is None:
         mimi = load_mimi(ckpt_id, device=device)
@@ -397,10 +431,13 @@ def derive_silence_codes(
     trimmed: dict[str, np.ndarray] = {}
     for name, wav in probes.items():
         codes = trim_edges(np.asarray(encode(wav)), params.trim_frames)
-        assert codes.shape[0] == num_codebooks, (
-            f"probe {name!r} encoded to {codes.shape[0]} codebooks, expected "
-            f"{num_codebooks}. The checkpoint does not match data_pipeline.schema."
-        )
+        # `raise`, not `assert`: this is the guard standing between a mismatched codec
+        # and a silently corrupt shipped bank, and `python -O` strips asserts.
+        if codes.shape[0] != num_codebooks:
+            raise ValueError(
+                f"probe {name!r} encoded to {codes.shape[0]} codebooks, expected "
+                f"{num_codebooks}. The checkpoint does not match project_amnesty.datasets.schema."
+            )
         m, s = codebook_modes(codes, codebook_size)
         per_probe[name] = {
             # Every probe's bank is written out, not just the chosen one: comparing
@@ -446,10 +483,33 @@ def derive_silence_codes(
     }
 
 
-def write_payload(payload: dict, path: str | Path) -> Path:
+def write_payload(payload: dict, path: str | Path, *, force: bool = False) -> Path:
+    """Serialize the payload, replacing `path` atomically.
+
+    Refuses to clobber an existing file unless `force`. The default `--output` is the committed
+    `configs/data/mimi_silence.json`, so a re-run with an exploratory flag (`--seed`, `--seconds`,
+    `--bank-probe`) would otherwise replace the shipped bank in place, with nothing but a git diff
+    to notice it. Overwriting is a deliberate act; make the caller say so.
+
+    The default target is the committed `configs/data/mimi_silence.json`, which
+    `TokenConfig` reads at the start of any real training run. `write_text` truncates
+    before it writes, so a run killed mid-write would leave invalid JSON exactly where
+    a valid bank used to be. Writing a sibling temp file and renaming avoids that:
+    `Path.replace` is atomic within a filesystem, so the target is either the old
+    payload or the new one, never a half of either.
+    """
     path = Path(path)
+    if path.exists() and not force:
+        raise FileExistsError(
+            f"{path} already exists. Re-deriving the bank replaces the shipped artifact that "
+            "TokenConfig loads, and a bank derived with different probe settings is not "
+            "interchangeable with the committed one. Pass --force to overwrite deliberately, or "
+            "--output to write somewhere else."
+        )
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=False) + "\n")
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(payload, indent=2, sort_keys=False) + "\n")
+    tmp.replace(path)
     return path
 
 
@@ -468,6 +528,9 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--ckpt-id", default=DEFAULT_MIMI_CKPT,
                    help="HF repo of the codec the corpus was baked with")
     p.add_argument("--output", default=DEFAULT_OUTPUT, help="where to write the JSON")
+    p.add_argument("--force", action="store_true",
+                   help="overwrite --output if it already exists (the default target is the "
+                        "committed bank, so replacing it must be deliberate)")
     p.add_argument("--device", default="cpu", help="torch device for the encoder")
     p.add_argument("--seconds", type=float, default=PROBE_SECONDS,
                    help="length of each probe signal")
@@ -533,7 +596,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
 
-    written = write_payload(payload, args.output)
+    written = write_payload(payload, args.output, force=args.force)
     print(f"\nwrote {written}", file=sys.stderr)
     print(
         "configs/tokens.yaml points at this file via silence_bank_path and asserts "
