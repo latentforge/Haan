@@ -1,22 +1,3 @@
-"""Haan model -- subclasses the Moshi model from `transformers`.
-
-Haan reuses Moshi's whole stack (Temporal + Depth Transformer, generation loop, delay
-pattern) and overrides the three places where the architecture actually differs:
-
-  - the Temporal input side. Moshi holds `2 * K` separate audio embedding tables, one set
-    per stream; Haan holds `K` shared tables and marks the stream with a role signal
-    instead. `_embed_audio_codes` is the single hook -- both `forward` and the generation
-    loop route audio embedding through it.
-  - the Depth Transformer. Moshi's per-index parameters run `2 * K` wide (one index per
-    predicted codebook, both streams laid end to end); Haan's run `K` wide and are shared
-    across roles, with the role added onto the per-index projection of `z_s`.
-  - attention. Qwen3 replaces Helium as the backbone and adds QK-Norm, so `HaanAttention`
-    / `HaanDecoderLayer` / `HaanModel` override Moshi's -- but on the *backbone* only. The
-    Depth Transformer keeps Moshi's plain attention.
-
-Everything else -- the delay pattern, `generate` -- is inherited untouched.
-"""
-
 import torch
 import torch.nn as nn
 from transformers.cache_utils import Cache, DynamicCache
@@ -44,16 +25,6 @@ from transformers.utils.output_capturing import capture_outputs
 
 from .configuration_haan import HaanConfig, HaanDepthConfig
 from .generation_haan import HaanGenerationMixin
-
-__all__ = [
-    "RoleEmbedding",
-    "HaanAttention",
-    "HaanDecoderLayer",
-    "HaanModel",
-    "HaanDepthDecoderModel",
-    "HaanDepthDecoderForCausalLM",
-    "HaanForConditionalGeneration",
-]
 
 
 def _sequence_width(input_ids: torch.Tensor | None, inputs_embeds: torch.Tensor | None) -> int:

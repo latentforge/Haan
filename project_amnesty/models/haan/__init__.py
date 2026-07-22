@@ -1,23 +1,16 @@
-from .configuration_haan import HaanConfig, HaanDepthConfig
-from .generation_haan import HaanGenerationMixin
-from .modeling_haan import (
-    HaanDepthDecoderForCausalLM,
-    HaanDepthDecoderModel,
-    HaanForConditionalGeneration,
-    HaanModel,
-    RoleEmbedding,
+from transformers import (
+    AutoModel, AutoModelForCausalLM,
+    AutoTokenizer, AutoProcessor, AutoConfig
 )
-from .processing_haan import HaanProcessor, HaanTokenizer
 
-__all__ = [
-    "HaanConfig",
-    "HaanDepthConfig",
-    "HaanModel",
-    "HaanDepthDecoderModel",
-    "HaanDepthDecoderForCausalLM",
-    "RoleEmbedding",
-    "HaanGenerationMixin",
-    "HaanForConditionalGeneration",
-    "HaanProcessor",
-    "HaanTokenizer",
-]
+from .configuration_haan import HaanConfig
+from .tokenization_haan import HaanTokenizer
+from .processing_haan import HaanProcessor
+from .modeling_haan import HaanModel, HaanForConditionalGeneration
+
+
+AutoConfig.register("haan", HaanModel)
+AutoTokenizer.register(HaanConfig, HaanTokenizer)
+AutoProcessor.register(HaanConfig, AutoProcessor)
+AutoModel.register(HaanConfig, HaanModel)
+AutoModelForCausalLM.register(HaanConfig, HaanForConditionalGeneration)

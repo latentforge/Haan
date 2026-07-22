@@ -1,18 +1,3 @@
-"""Haan model configuration -- subclasses the Moshi config from `transformers`.
-
-Haan IS a Moshi variant, so both configs inherit Moshi's and add only the fields the
-Haan deltas need. Everything else (audio_vocab_size, the Mimi sub-config, the depth
-sub-config wiring, backbone dims) is Moshi's.
-
-The Haan deltas the fields below exist for:
-  - the role signal -- self and user share one audio embedding table instead of Moshi's
-    two, so a separate signal tells the transformer which stream a code came from;
-  - the shared Depth Transformer -- its per-codebook parameters are shared across the two
-    roles, with the role added on top, rather than duplicated per stream;
-  - warm-start reuse -- Moshi's audio cardinality (2048) and depth width are kept as-is so
-    the Moshi weights transfer unchanged.
-"""
-
 from huggingface_hub.dataclasses import strict
 from transformers.models.moshi.configuration_moshi import MoshiConfig, MoshiDepthConfig
 
