@@ -1,28 +1,39 @@
-"""Haan model package. Grounded in ARCHITECTURE.md 1/3/5.
+"""Model definitions.
 
-The classes subclass the real transformers base classes (PretrainedConfig /
-PreTrainedModel / GenerationMixin / ProcessorMixin) -- transformers is a declared
-dependency (pyproject.toml: latentforge/transformers-moshi fork). The configs are
-functional; the modeling forward / warm-start / processor bodies are still TODO and
-raise NotImplementedError. Exported so utils/ can import
+Two subpackages:
+  haan/   the Haan model -- Moshi subclasses carrying the Haan deltas
+          (shared audio embeddings + role signal, role-shared Depth Transformer)
+  moshi/  a thin re-export of the stock Moshi classes from `transformers`
+          (the pinned fork, pyproject.toml: latentforge/transformers-moshi)
+
+Re-exported here so callers can use the short path,
 `from project_amnesty.models import HaanForConditionalGeneration`.
+
+`utils/` deliberately imports the long path (`from project_amnesty.models.haan import ...`)
+instead: with two subpackages under this one, the long path says which model is meant at the
+import site, and it keeps the training/eval entry points independent of this re-export layer.
 """
 
-from project_amnesty.models.configuration_haan import HaanConfig, HaanDepthConfig
-from project_amnesty.models.modeling_haan import (
-    HaanDepthDecoder,
+from project_amnesty.models.haan import (
+    HaanConfig,
+    HaanDepthConfig,
+    HaanDepthDecoderForCausalLM,
+    HaanDepthDecoderModel,
     HaanForConditionalGeneration,
+    HaanGenerationMixin,
     HaanModel,
+    HaanProcessor,
     RoleEmbedding,
 )
-from project_amnesty.models.processing_haan import HaanProcessor
 
 __all__ = [
     "HaanConfig",
     "HaanDepthConfig",
     "HaanModel",
-    "HaanDepthDecoder",
+    "HaanDepthDecoderModel",
+    "HaanDepthDecoderForCausalLM",
     "RoleEmbedding",
+    "HaanGenerationMixin",
     "HaanForConditionalGeneration",
     "HaanProcessor",
 ]
