@@ -107,8 +107,7 @@ class HaanConfig(MoshiConfig):
 
     # Full causal attention, where Moshi defaults to a 3000-frame sliding window.
     #
-    # This is an override of `MoshiConfig.sliding_window = 3000`, and it is a deliberate
-    # architectural choice rather than a tidy-up:
+    # This overrides `MoshiConfig.sliding_window = 3000`:
     #
     #   - Moshi's ~5 minute context limit is a teacher weakness Haan must not inherit. Keeping the
     #     window would transplant that limit *structurally* -- by construction, not through KD -- so
@@ -117,7 +116,7 @@ class HaanConfig(MoshiConfig):
     #     assumptions is the kind of bug that happens silently at code level. This is exactly that
     #     mismatch: Qwen3 is full-attention over 40960 positions.
     #
-    # It is not inert, and it is not loud either. `MoshiModel.forward` selects
+    # `MoshiModel.forward` selects
     # `create_sliding_window_causal_mask` whenever this is non-None, and `DynamicCache` builds
     # window layers that physically evict KV past the window. But a sliding window of W is
     # bit-identical to full causal for any sequence of length <= W, and training runs at 750 frames
@@ -140,9 +139,9 @@ class HaanConfig(MoshiConfig):
     # should describe Haan rather than its Moshi parent.
     #
     # Set it False ONLY for a Moshi-backbone build (a Moshi-backbone baseline, or a Moshi-only
-    # warm-start). This is not cosmetic: an RMSNorm whose weight is all ones still rescales its
-    # input, so leaving it on under Moshi backbone weights corrupts an otherwise exact transfer,
-    # and turning it off under Qwen3 weights discards two tensors per layer.
+    # warm-start). An RMSNorm whose weight is all ones still rescales its input, so leaving it on
+    # under Moshi backbone weights corrupts an otherwise exact transfer, and turning it off under
+    # Qwen3 weights discards two tensors per layer.
     use_qk_norm: bool = True
 
     def __post_init__(self, **kwargs):

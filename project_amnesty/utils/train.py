@@ -1,30 +1,26 @@
-"""train.py -- training entry point (with loop).  [FIXED]
+"""train.py -- training entry point (with loop).
 
-The location/name of this file (`project_amnesty/utils/train.py`) must not change
-(`filemap.md` fixed rule). `runner.py` (the Phase manager) drives this entry point
-per phase.
+`runner.py` (the phase manager) drives this entry point per phase.
 
 On top of the canonical PyTorch training loop
 (`train_loop`: forward -> loss -> backward -> optimizer.step -> zero_grad) we layer
 the Haan training stack:
   - **Distributed**: FSDP2 (`fully_shard`). Default `reshard_after_forward=False`
-    (keep parameters replicated, shard grad/optim state only) -- a 9.15B bf16 copy
-    (~16GB per GPU) sits comfortably resident on an A100 80GB, so the parameters
+    (keep parameters replicated, shard grad/optim state only), so the parameters
     themselves are not sharded. Fall back to True (ZeRO-3 class) only when VRAM is
-    tight. (TRAINING_CURRICULUM 3.3)
+    tight.
   - **Optimizer**: PagedAdamW8bit -- the A100 (Ampere) cannot accelerate FP8 tensor
-    cores, so an 8-bit optimizer yields the same memory savings. (TRAINING_CURRICULUM 3.3)
+    cores, so an 8-bit optimizer yields the same memory savings.
   - **Kernels**: Liger Kernel (fused RMSNorm/RoPE/SwiGLU/CE/FusedLinearCE). Compatible
-    with FlashAttention and FSDP. (TRAINING_CURRICULUM 5.1)
+    with FlashAttention and FSDP.
   - **Loss**: semantic-KD KL (Mimi level-0 logit) + Korean TTS CE + voice-cloning CE +
     text anchor CE combined. Acoustic codebooks (1~7) are excluded from KD by default
     (timbre carriers). It consumes the per-token weights the collator ships (stream PAD
     text x0.3, non-semantic audio x0.02) and the semantic-KD internal frame weights
     (speech / turn-transition regions) as-is. Zone A (system prompt) regions and batch
-    pad are fully masked out of the loss. (ARCHITECTURE 5.1/7.6, RISKS 7.4)
+    pad are fully masked out of the loss.
   - **Diagnostic hooks**: grad-norm (per-task gradient dominance watch) - self/user role
     vector cosine separation - Depth batch-2 two-element output-collapse probing.
-    (ARCHITECTURE 3.5/5.4, RISKS 2/3)
 
 Run: `python -m project_amnesty.utils.train --config configs/phase2_joint.json`
 Config is JSON (no yaml). ModelArgs/DataArgs/TrainArgs are defined at the top of this
@@ -70,25 +66,25 @@ from transformers import HfArgumentParser
 
 @dataclass
 class ModelArgs:
-    """Backbone / audio / Depth / warm-start settings. (ARCHITECTURE 1/3/5.4)"""
+    """Backbone / audio / Depth / warm-start settings."""
 
     backbone: str = "Qwen/Qwen3-8B"
     moshi_ckpt: str = "kmhf/hf-moshiko"  # warm-start source (emb.8~15, depformer, linears)
     num_codebooks: int = 8  # K (number of audio codebooks in the self stream = dep_q)
-    depth_dim: int = 1024  # Depth Transformer internal dim (independent of backbone dim, 5.4.1)
+    depth_dim: int = 1024  # Depth Transformer internal dim (independent of backbone dim)
     audio_cardinality: int = 2048  # frozen Mimi shared -> teacher/student identical
     # Audio embedding table is shared across self/user (8 books). Role is distinguished by a
-    # learned additive Role Token. (3.3)
-    share_scope: str = "semantic+acoustic"  # ablation: "semantic" | "semantic+acoustic" (3.6)
-    init_source: str = "user"  # codebook init: "user"(emb.8~15) | "self"(emb.0~7) | "random" (5.4.2)
+    # learned additive Role Token.
+    share_scope: str = "semantic+acoustic"  # ablation: "semantic" | "semantic+acoustic"
+    init_source: str = "user"  # codebook init: "user"(emb.8~15) | "self"(emb.0~7) | "random"
     # Depth parallel-prediction mode switch: train q16 (self+user, batch 2) / live inference
-    # q8 (self, batch 1). (5.4)
+    # q8 (self, batch 1).
     depth_mode: str = "q16"  # "q16"(training/simulation) | "q8"(live conversation)
 
 
 @dataclass
 class DataArgs:
-    """Data root / frames / collator wiring settings. (DATA_STRATEGY 4)"""
+    """Data root / frames / collator wiring settings."""
 
     # SUPERSEDED: the whole data stack (root/dataset/mix/sampler/dataloader) now comes from
     # `configs/data/loader.yaml` via `datasets.loader.load_configs` (see build_dataloader). The
@@ -97,33 +93,32 @@ class DataArgs:
     # real data stack anymore.
     root: str = "data/prepared"
     max_frames: int = 750  # context cap at 12.5Hz (60 seconds)
-    double_ab: bool = True  # reuse the same conversation once in each A/B direction (role swap) (DATA 4.2)
+    double_ab: bool = True  # reuse the same conversation once in each A/B direction (role swap)
     config_json: str = "configs/data.json"  # datasets pipeline config (JSON)
-    ko_ratio: float = 0.1  # Korean data ratio (ramped up in Phase 2: 0.1->0.3->0.5, Phase 2)
+    ko_ratio: float = 0.1  # Korean data ratio (ramped up in Phase 2: 0.1->0.3->0.5)
     num_workers: int = 4
 
-    # --- Collator delay (per-phase knob; NOT in loader.yaml by design, ARCH 5.0.2) ---
+    # --- Collator delay (per-phase knob; NOT in loader.yaml by design) ---
     # `delay` changes between curriculum phases, so it is supplied here per phase rather than baked
     # into the static YAML. build_dataloader threads these into the KDCollator's DelayConfig.
-    acoustic_delay: int = 1        # Phase 1+ conversation default (ARCH 5.0.2 / runner: acoustic 1, text 0).
+    acoustic_delay: int = 1        # Phase 1+ conversation default (runner: acoustic 1, text 0).
     text_delay_frames: int = 0     # Phase 0 pre-training override = acoustic 2 / text +-0.6 via per-phase config.
 
 
 @dataclass
 class TrainArgs:
-    """Training hyperparameters / distributed / optimizer / loss weights / diagnostic intervals.
-    (TRAINING_CURRICULUM 3/5, ARCHITECTURE 7.6)"""
+    """Training hyperparameters / distributed / optimizer / loss weights / diagnostic intervals."""
 
     phase: str = "phase2_joint"  # phase identifier selected by runner.py
 
     # --- Distributed (FSDP2) ---
-    reshard_after_forward: bool = False  # False=ZeRO-2 class (param replicate), True=ZeRO-3 class (3.3)
+    reshard_after_forward: bool = False  # False=ZeRO-2 class (param replicate), True=ZeRO-3 class
 
     # --- Optimizer ---
-    optim: str = "paged_adamw_8bit"  # A100 -> 8-bit optimizer for memory savings (3.3)
+    optim: str = "paged_adamw_8bit"  # A100 -> 8-bit optimizer for memory savings
     lr: float = 2e-5
     audio_param_lr: float = 2e-5  # dedicated lr for audio embedding / Depth heads / Role Token
-    #                               (can be lowered early to prevent drift, 7.5)
+    #                               (can be lowered early to prevent drift)
     weight_decay: float = 0.01
     betas: tuple[float, float] = (0.9, 0.95)
     max_grad_norm: float = 1.0
@@ -131,46 +126,46 @@ class TrainArgs:
     warmup_steps: int = 500
     steps: int = 45000
     epochs: int = 1  # optional epoch cap; the loop stops at whichever of steps/epochs comes first
-    lr_scheduler_type: str = "cosine"  # transformers get_scheduler type; cosine decay w/ warmup (fix1)
+    lr_scheduler_type: str = "cosine"  # transformers get_scheduler type; cosine decay w/ warmup
 
     # --- Kernels ---
-    use_liger_kernel: bool = True  # (5.1)
+    use_liger_kernel: bool = True
     liger_config: dict = field(default_factory=lambda: {
         "rope": True, "swiglu": True, "cross_entropy": True,
         "fused_linear_cross_entropy": True, "rms_norm": True,
     })
 
     # --- Fine-tuning mode ---
-    full_ft: bool = True  # Phase 1~3/5 are Full FT (avoid shortcuts, 3.2). Only Phase 4 uses LoRA.
-    freeze_audio_emb_steps: int = 0  # if >0, freeze audio embeddings for the first N steps then warm up (RISKS 7.5)
+    full_ft: bool = True  # Phase 1~3/5 are Full FT (avoid shortcuts). Only Phase 4 uses LoRA.
+    freeze_audio_emb_steps: int = 0  # if >0, freeze audio embeddings for the first N steps then warm up
     # Activation (gradient) checkpointing: trade compute for memory. Enabled BEFORE the FSDP2 wrap
-    # in main() so re-materialized activations live under the sharded module (fix3, RISKS/3.3).
+    # in main() so re-materialized activations live under the sharded module.
     gradient_checkpointing: bool = True
 
     # --- Combined loss weights ---
-    kd_weight: float = 1.0  # semantic KD KL term (5.1)
+    kd_weight: float = 1.0  # semantic KD KL term
     ce_weight: float = 1.0  # Korean TTS CE + voice-cloning CE term
-    text_anchor_weight: float = 0.1  # multilingual text-ability anchor (small, all regions, RISKS 7.6)
+    text_anchor_weight: float = 0.1  # multilingual text-ability anchor (small, all regions)
     kd_temperature: float = 1.0  # KL distillation temperature
-    pad_text_weight: float = 0.3  # down-weight stream PAD text tokens (7.6)
-    non_sem_audio_weight: float = 0.02  # down-weight non-semantic (acoustic) audio tokens (7.6)
+    pad_text_weight: float = 0.3  # down-weight stream PAD text tokens
+    non_sem_audio_weight: float = 0.02  # down-weight non-semantic (acoustic) audio tokens
 
     # --- KD operating mode ---
-    kd_logit_dump: str = ""  # empty = live teacher; if set, path to pre-dumped top-k logits (offline, RISKS 7.3)
-    on_policy_ratio: float = 0.0  # if >0, fraction of self-rollout via scheduled sampling (RISKS 7.3)
+    kd_logit_dump: str = ""  # empty = live teacher; if set, path to pre-dumped top-k logits (offline)
+    on_policy_ratio: float = 0.0  # if >0, fraction of self-rollout via scheduled sampling
 
     # --- Diagnostics / checkpoint / logging ---
     log_interval: int = 20
-    probe_interval: int = 500  # role-vector cosine / batch-collapse probing interval (3.5/5.4)
+    probe_interval: int = 500  # role-vector cosine / batch-collapse probing interval
     ckpt_interval: int = 2000
-    keep_last_n_ckpts: int = 3  # keep-last-N rotation of periodic step_* checkpoints (fix8); final always kept
+    keep_last_n_ckpts: int = 3  # keep-last-N rotation of periodic step_* checkpoints; final always kept
     out_dir: str = "checkpoints"
     resume: str = ""  # checkpoint path to resume from (injected by runner.py on phase transition)
     seed: int = 42
     bf16: bool = True
 
     # Name PREFIXES identifying the "brand-new" parameters (audio RVQ embeddings, Role Token,
-    # shared Depth Transformer) that must always train in full precision (3.1). See
+    # shared Depth Transformer) that must always train in full precision. See
     # NEW_PARAM_PREFIXES below for why these are prefixes and not substrings.
     new_param_prefixes: tuple[str, ...] = ()  # empty -> NEW_PARAM_PREFIXES (the model's real names)
 
@@ -179,12 +174,12 @@ class TrainArgs:
 # 1b. Parameter-name contract shared with project_amnesty.models.haan
 # ======================================================================================
 
-# Haan's brand-new parameters (ARCH 3.1/3.3/5.4), spelled EXACTLY as
+# Haan's brand-new parameters, spelled EXACTLY as
 # `HaanForConditionalGeneration.named_parameters()` yields them:
 #
-#   embed_tokens.{0..K-1}.weight              shared audio input embeddings          (3.3)
-#   role_embedding.{role_scale|role_emb}      Temporal-side role signal              (3.3)
-#   depth_decoder.*                           the whole shared Depth Transformer     (5.4),
+#   embed_tokens.{0..K-1}.weight              shared audio input embeddings
+#   role_embedding.{role_scale|role_emb}      Temporal-side role signal
+#   depth_decoder.*                           the whole shared Depth Transformer,
 #                                             i.e. its own role_embedding, the per-index
 #                                             input_projections, and the lm_heads
 #
@@ -197,7 +192,7 @@ class TrainArgs:
 # match NOTHING in models/haan -- they would have silently produced an empty new-param group.)
 NEW_PARAM_PREFIXES = ("embed_tokens.", "role_embedding.", "depth_decoder.")
 
-# The audio input embeddings alone (the optional early-freeze warmup, RISKS 7.5) -- a strict
+# The audio input embeddings alone (the optional early-freeze warmup) -- a strict
 # subset of NEW_PARAM_PREFIXES, kept separate because freezing must NOT touch the Depth decoder.
 AUDIO_EMB_PREFIXES = ("embed_tokens.",)
 
@@ -235,21 +230,21 @@ def _new_param_prefixes(args: TrainArgs) -> tuple[str, ...]:
 def build_model(margs: ModelArgs, targs: TrainArgs) -> "torch.nn.Module":
     """Build the Haan model: Qwen3 backbone + shared audio embeddings (K) + Role Token + shared Depth.
 
-    Delegates the transfer to `utils.warm_start_haan` (ARCH 1 / 5.4.1 / 5.4.2), which owns the
-    mapping and reports what did NOT transfer. In summary: the Temporal backbone, `lm_head` and
-    QK-Norm come from Qwen3; the audio input embeddings from Moshi's user-side tables (5.4.2); the
-    Depth body / heads / per-index projections from Moshi verbatim, with `input_projections`
-    initialized from Moshi but retrained as an adapter (5.4.1). The role embeddings start at
-    identity and the depth text embedding starts cold (different tokenizer).
+    Delegates the transfer to `utils.warm_start_haan`, which owns the mapping and reports what did
+    NOT transfer. In summary: the Temporal backbone, `lm_head` and QK-Norm come from Qwen3; the
+    audio input embeddings from Moshi's user-side tables; the Depth body / heads / per-index
+    projections from Moshi verbatim, with `input_projections` initialized from Moshi but retrained
+    as an adapter. The role embeddings start at identity and the depth text embedding starts cold
+    (different tokenizer).
 
-    `backbone=""` selects the ARCH 3.6 baseline arm instead -- everything, backbone included, from
-    Moshi. That is the control the Qwen3 substitution is measured against, so it is a supported
-    mode rather than a fallback.
+    `backbone=""` selects the baseline arm instead -- everything, backbone included, from Moshi.
+    That is the control the Qwen3 substitution is measured against, so it is a supported mode
+    rather than a fallback.
 
     The dimension-bearing ModelArgs (`num_codebooks` / `depth_dim` / `audio_cardinality`) are
-    VALIDATED against the checkpoints rather than applied to them: 5.4.1 reuses Moshi's audio
-    cardinality and depth width as-is, so a config asking for different ones is not a variant of
-    the warm-start, it is a silent cancellation of it.
+    VALIDATED against the checkpoints rather than applied to them: the warm-start reuses Moshi's
+    audio cardinality and depth width as-is, so a config asking for different ones is not a variant
+    of the warm-start, it is a silent cancellation of it.
     """
     from project_amnesty.utils import warm_start_haan  # noqa: PLC0415
 
@@ -267,7 +262,7 @@ def build_model(margs: ModelArgs, targs: TrainArgs) -> "torch.nn.Module":
             verbose=verbose,
         )
     else:
-        # ARCH 3.6 baseline: Moshi backbone, so the Korean-emergence comparison has a control.
+        # Baseline: Moshi backbone, so the Korean-emergence comparison has a control.
         model = warm_start_haan.warm_start_from_moshi(
             margs.moshi_ckpt,
             init_source=margs.init_source,
@@ -275,7 +270,7 @@ def build_model(margs: ModelArgs, targs: TrainArgs) -> "torch.nn.Module":
             verbose=verbose,
         )
 
-    # 5.4.1 keeps Moshi's audio cardinality (2048) and depth dim (1024); K is the stream width.
+    # The warm-start keeps Moshi's audio cardinality (2048) and depth dim (1024); K is the stream width.
     for field, expected, actual in (
         ("num_codebooks", margs.num_codebooks, model.config.num_codebooks),
         ("depth_dim", margs.depth_dim, model.config.depth_decoder_config.hidden_size),
@@ -289,7 +284,7 @@ def build_model(margs: ModelArgs, targs: TrainArgs) -> "torch.nn.Module":
                 f"checkpoint."
             )
 
-    # ARCH 5.4: q16 rolls out self+user (training / simulation), q8 self only (live conversation).
+    # q16 rolls out self+user (training / simulation), q8 self only (live conversation).
     # Training goes through `forward` and never consults this switch; set it anyway so a model
     # handed straight to `generate` behaves as the phase config says.
     model.set_depth_mode({"q16": "simulation", "q8": "live"}[margs.depth_mode])
@@ -307,7 +302,7 @@ def _reject_unimplemented_model_args(margs: ModelArgs, targs: TrainArgs) -> None
 
     if margs.share_scope != "semantic+acoustic":
         # models/haan shares all K audio tables unconditionally (modeling_haan.HaanForConditionalGeneration),
-        # so the ARCH 3.6 "semantic"-only ablation has no implementation to select.
+        # so the "semantic"-only ablation has no implementation to select.
         raise NotImplementedError(
             f"ModelArgs.share_scope={margs.share_scope!r} is not implemented: models/haan shares all "
             "K audio tables unconditionally, so only 'semantic+acoustic' is realizable. The ARCH 3.6 "
@@ -315,14 +310,12 @@ def _reject_unimplemented_model_args(margs: ModelArgs, targs: TrainArgs) -> None
         )
 
     # `backbone` now selects the warm-start arm rather than being rejected: a non-empty value is the
-    # ARCH 1 Qwen3 substitution, `""` is the ARCH 3.6 Moshi-backbone control. Nothing to validate
-    # here beyond what warm_start_haan itself checks against the two checkpoints.
+    # Qwen3 substitution, `""` is the Moshi-backbone control. Nothing to validate here beyond what
+    # warm_start_haan itself checks against the two checkpoints.
 
     if targs.use_liger_kernel:
-        # `use_liger_kernel` / `liger_config` are read NOWHERE else in this file. The previous
-        # build_model forwarded them to a stub `from_pretrained` that raised, so the fact that
-        # nothing applies them was never observable. Both are still unapplied, and liger_kernel is
-        # not even installed -- so leaving this silent would size a phase for fused-kernel memory
+        # `use_liger_kernel` / `liger_config` are read NOWHERE else in this file, and liger_kernel
+        # is not even installed -- so leaving this silent would size a phase for fused-kernel memory
         # and throughput it does not get.
         detail = (
             "the package is not installed" if not _liger_available()
@@ -338,7 +331,7 @@ def _reject_unimplemented_model_args(margs: ModelArgs, targs: TrainArgs) -> None
 
 
 def _liger_available() -> bool:
-    """Whether the Liger Kernel package can be imported (ARCH 5.1)."""
+    """Whether the Liger Kernel package can be imported."""
     import importlib.util  # noqa: PLC0415
 
     return importlib.util.find_spec("liger_kernel") is not None
@@ -365,11 +358,11 @@ def _liger_available() -> bool:
 #
 #   3. **The delay pattern, which is why the labelled path is not used at all.** Moshi's
 #      labelled branch runs `build_delay_pattern_mask` over `audio_labels` internally. The
-#      KDCollator has ALREADY applied the delay (`KDCollator.set_delay`, `DelayConfig`,
-#      ARCH 5.0.2), so going through that branch would delay the codes a second time -- a
-#      silent, phase-dependent misalignment between the KD teacher and the student exactly of
-#      the kind RISKS 7.8 warns about. Calling the decoder without labels skips it entirely, and
-#      the depth decoder is then driven directly with the collator's already-delayed codes.
+#      KDCollator has ALREADY applied the delay (`KDCollator.set_delay`, `DelayConfig`), so
+#      going through that branch would delay the codes a second time -- a silent, phase-dependent
+#      misalignment between the KD teacher and the student. Calling the decoder without labels
+#      skips it entirely, and the depth decoder is then driven directly with the collator's
+#      already-delayed codes.
 #
 # The depth decoder is teacher-forced the way Moshi teacher-forces it: every frame becomes one
 # row, and position `p` of that row is fed codebook `p - 1` (position 0 takes the frame's text
@@ -377,7 +370,7 @@ def _liger_available() -> bool:
 
 
 def _split_streams(audio_codes: "torch.Tensor") -> "tuple[torch.Tensor, torch.Tensor]":
-    """`(B, 2, K, T)` -> `(assistant, user)`, each `(B, K, T)` (ARCH 5.0.3 stream order)."""
+    """`(B, 2, K, T)` -> `(assistant, user)`, each `(B, K, T)` (stream order [self, user])."""
     if audio_codes.dim() != 4 or audio_codes.shape[1] != 2:
         raise ValueError(
             f"audio codes must be (B, 2, K, T) with axis 1 = [self, user]; got {tuple(audio_codes.shape)}."
@@ -393,19 +386,16 @@ def forward_with_contract(model: "torch.nn.Module", batch: dict) -> dict:
     audio logits are assembled here and there is no Moshi output class that describes them in
     this layout; `loss_fn` already accepts either.
 
-    Memory note: `audio_logits` is `B * 2 * K * T * C` floats -- at B=8, T=750, K=8, C=2048 that
-    is ~790 MB in bf16 before the loss upcasts it. That cost is inherent to supervising every
-    codebook per frame (ARCH 7.6), not to this adapter, but it is the tensor to look at first
-    when sizing a phase.
+    Memory note: `audio_logits` is `B * 2 * K * T * C` floats. That cost is inherent to
+    supervising every codebook per frame, not to this adapter, but it is the tensor to look at
+    first when sizing a phase.
     """
     if not isinstance(batch, dict):
         raise TypeError(f"expected the KDCollator batch dict; got {type(batch).__name__}.")
 
-    # A text-anchor micro-batch (RISKS 7.6) carries no audio at all -- `TextAnchorCollator` refuses to
-    # fabricate silence to match shapes. `RoutingCollator` labels the two kinds because "branching on
-    # a shared key would silently do the wrong thing on one path" (loader.py), so branch on the label.
-    # Nothing read it before, and every anchor batch died here on the audio-key check instead: at the
-    # configured 5% mix that is a crash roughly every 20 steps.
+    # A text-anchor micro-batch carries no audio at all -- `TextAnchorCollator` refuses to fabricate
+    # silence to match shapes. `RoutingCollator` labels the two kinds because branching on a shared
+    # key would silently do the wrong thing on one path (loader.py), so branch on the label.
     if batch.get("batch_kind") == "text_anchor":
         if "input_ids" not in batch:
             raise KeyError("a text_anchor batch must carry `input_ids` (B, L) (RISKS 7.6).")
@@ -418,8 +408,8 @@ def forward_with_contract(model: "torch.nn.Module", batch: dict) -> dict:
 
     input_ids = batch["input_ids"]
     targets = batch["audio_codes"]
-    # `input_audio_codes` is the scheduled-sampling conditioning copy (RISKS 7.3); when present the
-    # model conditions on it while the loss still supervises the ground-truth `audio_codes` (fix4).
+    # `input_audio_codes` is the scheduled-sampling conditioning copy; when present the model
+    # conditions on it while the loss still supervises the ground-truth `audio_codes`.
     conditioning = batch.get("input_audio_codes")
     conditioning = targets if conditioning is None else conditioning
 
@@ -456,21 +446,20 @@ def forward_with_contract(model: "torch.nn.Module", batch: dict) -> dict:
 
 
 def rollout_with_contract(model, batch: dict, n_frames: int, prompt_frames: int):
-    """Self-play rollout: generate `n_frames` of BOTH streams, frame-aligned (ARCH §5.0.3/§5.4).
+    """Self-play rollout: generate `n_frames` of BOTH streams, frame-aligned.
 
     Conditions on the FIRST `prompt_frames` frames of `batch` and lets the model invent the rest.
     Returns `(codes, gen)`:
 
       * `codes` -- `(B, 2, K, n_gen)` long, axis 1 = `[self, user]`: the layout both the on-policy
-        scheduled sampler (RISKS §7.3) and the offline simulation consume.
+        scheduled sampler and the offline simulation consume.
       * `gen`   -- the raw `generate` output, so a caller that also needs the text stream reads
         `gen.sequences` off the SAME rollout instead of generating a second time.
 
     This is the ONE place the assistant stream is end-anchored against the predicted user tail.
     `generate` trims the leading all-BOS run off the assistant codes, so a prompt-anchored slice
     (`[..., prompt_frames:]`) is off by that trim on every first turn -- and if the two consumers
-    each re-derived the alignment, a one-frame disagreement between them would be invisible in both
-    (the RISKS §7.8 class; it has already happened once on the text stream).
+    each re-derived the alignment, a one-frame disagreement between them would be invisible in both.
 
     Both roles must be rolled out, so the depth decoder is switched to `"simulation"` for the call
     and restored afterwards: in `"live"` mode `generate` returns no predicted user stream at all.
@@ -532,9 +521,9 @@ def _assert_stream_tokens_are_reserved(tokens) -> None:
     `TokenConfig` checks that the three ids differ from each other; it cannot check what they ARE,
     because it holds `tokenizer_name` as a string and never loads a tokenizer. That gap is where the
     damaging mistake lives: an id below `len(tokenizer)` is a REAL token, and the stream PAD alone
-    fills ~65% of the text channel (ARCH 7.6), so training would overwrite whatever that token meant.
+    fills most of the text channel, so training would overwrite whatever that token meant.
     `<|im_end|>` is the loud version of this -- it would teach "generation over" as the resting state
-    of the channel and take the Qwen3 backbone's instruction-following with it (RISKS 7.12/7.13).
+    of the channel and take the Qwen3 backbone's instruction-following with it.
 
     Qwen3-8B has 151936 embedding rows for 151669 real tokens; `configs/tokens.yaml` deliberately
     assigns all three ids into that gap. No UPPER bound is checked here -- only the model knows how
@@ -542,7 +531,7 @@ def _assert_stream_tokens_are_reserved(tokens) -> None:
 
     Checked here rather than in `HaanProcessor._pad_token_id`, which enforces the same contract for
     anyone loading a published checkpoint: this project's pipeline never constructs that processor,
-    so the collator (`collator.py:580`) would have consumed the bad id with nothing in the way.
+    so the collator (collator.py) would have consumed the bad id with nothing in the way.
     """
     from transformers import AutoTokenizer  # noqa: PLC0415
 
@@ -580,13 +569,13 @@ def _assert_stream_tokens_are_reserved(tokens) -> None:
 def build_dataloader(dargs: DataArgs, targs: TrainArgs, split: str = "train") -> "LoaderBundle":
     """Assemble the real data stack via datasets.load_configs + build_dataloader -> LoaderBundle.
     Config (root/dataset/mix/sampler/dataloader) comes from configs/data/loader.yaml; only `delay`
-    is a per-phase knob supplied here (ARCH 5.0.2 -- not in the static YAML).
+    is a per-phase knob supplied here (not in the static YAML).
 
     The returned `LoaderBundle` exposes `.loader` (the iterable DataLoader), `.set_epoch(epoch)`
     (advances datasets + sampler RNG together), and `.state_dict()`/`.load_state_dict()` for resume;
     train_loop / save_checkpoint / load_checkpoint drive those. The collator batch is passed to the
     model as-is; it carries `input_ids`, `audio_codes`, the teacher top-k dump, `kd_frame_weight`,
-    and the per-token loss weights the loss consumes (ARCH 7.6/7.4).
+    and the per-token loss weights the loss consumes.
     """
     # Heavy datasets imports stay LAZY here so the module py_compiles / imports with torch alone.
     from project_amnesty.datasets.loader import build_dataloader as _build, load_configs
@@ -619,33 +608,33 @@ def build_dataloader(dargs: DataArgs, targs: TrainArgs, split: str = "train") ->
 # model/collator "just works" and a non-conforming one fails loud.
 #
 # MODEL OUTPUT (`outputs = forward_with_contract(model, batch)`):
-#   - `outputs.text_logits`  Float (B, T, V_text)   Inner-Monologue text logits (ARCH 5.0.1).
+#   - `outputs.text_logits`  Float (B, T, V_text)   Inner-Monologue text logits.
 #                            Falls back to `outputs.logits` when `text_logits` is absent.
 #   - `outputs.audio_logits` Float (B, 2, K, T, C)  role r in {0=self, 1=user}, codebook
-#                            k in {0..K-1}, C=2048 (frozen Mimi). Semantic level-0 == k==0 (ARCH 5.0/5.1).
+#                            k in {0..K-1}, C=2048 (frozen Mimi). Semantic level-0 == k==0.
 #   - `model.generate(batch, mode="simulation", max_new_frames=..., ...)` -> obj/dict with
-#                            `codes` (B, 2, K, T_gen) -- used only by the on-policy hook (ARCH 5.0.3/5.4, RISKS 7.3).
+#                            `codes` (B, 2, K, T_gen) -- used only by the on-policy hook.
 #
 # BATCH (KDCollator output; keys guarded, teacher keys optional -> KD contributes 0):
 #   - `input_ids`         (B, T)          long   text-stream token ids.
 #   - `audio_codes`       (B, 2, K, T)    long   ground-truth Mimi codes (self/user, all K books).
 #                                                This is the audio-CE supervision TARGET; it is never
-#                                                overwritten by the on-policy hook (fix4).
+#                                                overwritten by the on-policy hook.
 #   - `input_audio_codes` (B, 2, K, T)    long   OPTIONAL scheduled-sampling INPUT conditioning: a
 #                                                copy of `audio_codes` whose trailing self-frames may
-#                                                be the model's own rollout (RISKS 7.3). Present only
-#                                                when on_policy_ratio>0; the model conditions on it
-#                                                while the loss still supervises the GT `audio_codes`.
+#                                                be the model's own rollout. Present only when
+#                                                on_policy_ratio>0; the model conditions on it while
+#                                                the loss still supervises the GT `audio_codes`.
 #   - `role_ids`          (B, 2)          long   {self, user} row order (documentation; not read here).
-#   - `text_loss_weight`  (B, T)          float  stream-PAD x0.3, EPAD x1, Zone A / batch-pad = 0 (ARCH 7.6).
+#   - `text_loss_weight`  (B, T)          float  stream-PAD x0.3, EPAD x1, Zone A / batch-pad = 0.
 #   - `audio_loss_weight` (B, 2, K, T)    float  semantic=1, non-sem x0.02, synthetic user ch=0,
-#                                                Zone A / batch-pad = 0 (ARCH 7.6).
+#                                                Zone A / batch-pad = 0.
 #   - `teacher_topk_val`  (B, 2, T, topk) float  teacher top-k logits (semantic k=0), real collator key.
 #   - `teacher_topk_idx`  (B, 2, T, topk) long   teacher top-k support indices.
 #   - `kd_valid`          (B, 2, T)       bool   frames with a valid teacher dump.
-#   - `kd_frame_weight`   (B, 2, T)       float  silence/speech imbalance weight (RISKS 7.4).
+#   - `kd_frame_weight`   (B, 2, T)       float  silence/speech imbalance weight.
 #   - `target_aligned`    True                   collator tripwire (semantic_kd_loss_from_batch asserts it).
-#   - `is_text_only`      (B,)            bool   pure-text rows for the anchor term (RISKS 7.6).
+#   - `is_text_only`      (B,)            bool   pure-text rows for the anchor term.
 # --------------------------------------------------------------------------------------
 
 _LOSS_EPS = 1e-8  # denominator floor -> a term with zero valid tokens reduces to 0 (never NaN)
@@ -654,11 +643,11 @@ _LOSS_EPS = 1e-8  # denominator floor -> a term with zero valid tokens reduces t
 def _weighted_token_ce(
     logits: "torch.Tensor", targets: "torch.Tensor", weights: "torch.Tensor"
 ) -> "torch.Tensor":
-    """Per-token weighted cross-entropy, reduced to a scalar weighted mean. (ARCH 7.6)
+    """Per-token weighted cross-entropy, reduced to a scalar weighted mean.
 
     `logits` (..., C) float, `targets` (...) long, `weights` (...) float share the same leading
     dims. Returns sum(nll * weights) / sum(weights); when the weights sum to zero (every token
-    masked -- Zone A / batch pad, ARCH 7.6) it returns 0 with no NaN (the floor `_LOSS_EPS`
+    masked -- Zone A / batch pad) it returns 0 with no NaN (the floor `_LOSS_EPS`
     guards the division). Targets are clamped into [0, C) so masked/pad positions carrying an
     arbitrary id cannot trigger an out-of-range gather; their weight is 0 anyway. Logits are
     upcast to float32 for a numerically stable log-softmax under bf16 training.
@@ -677,21 +666,21 @@ def build_loss_fn(targs: TrainArgs) -> Callable[[Any, dict], "torch.Tensor"]:
     Returned-callable contract: `loss_fn(outputs, batch) -> (total_loss, metrics: dict[str, float])`.
     Consumes the MODEL I/O + BATCH contract documented just above this function.
 
-      - **KD** (ARCH 5.1, RISKS 7.4): delegated to `losses.semantic_kd_loss_from_batch` -- KL over
-        Mimi semantic (level-0, k==0) logits. teacher/student share the frozen Mimi output space (2048)
+      - **KD**: delegated to `losses.semantic_kd_loss_from_batch` -- KL over Mimi semantic
+        (level-0, k==0) logits. teacher/student share the frozen Mimi output space (2048)
         so no projection is needed. Teacher = softmax of the collator's top-k dump
         (`teacher_topk_val`/`teacher_topk_idx`) at temperature `kd_temperature`; student = log-softmax
         of `audio_logits[:, 0, 0]` (role 0, cb 0). Per-frame KL is masked by `kd_valid` and weighted by
         `kd_frame_weight` (silence/speech imbalance -- no separate auxiliary term). Scaled by
         `kd_weight`. Contributes exactly 0 when the batch carries no teacher dump. The SAME
-        `losses.semantic_kd_loss` serves the on-policy path so the objective cannot drift (Phase 5).
-      - **Audio CE** (ARCH 7.6): cross-entropy of `audio_logits` vs `audio_codes` over all K
+        `losses.semantic_kd_loss` serves the on-policy path so the objective cannot drift.
+      - **Audio CE**: cross-entropy of `audio_logits` vs `audio_codes` over all K
         codebooks, per-token weighted by `audio_loss_weight` (semantic=1, non-sem x0.02, synthetic
         user channel=0, Zone A / batch pad=0). Scaled by `ce_weight`.
-      - **Text CE** (ARCH 5.0.1/7.6): cross-entropy of `text_logits` vs frame-aligned `input_ids`
+      - **Text CE**: cross-entropy of `text_logits` vs frame-aligned `input_ids`
         (Inner Monologue -- no shift; each frame already carries its text token), per-token weighted
         by `text_loss_weight` (stream PAD x0.3, Zone A / batch pad=0). Scaled by `ce_weight`.
-      - **Anchor** (RISKS 7.6): a light pure-text CE restricted to `is_text_only` rows, guarding the
+      - **Anchor**: a light pure-text CE restricted to `is_text_only` rows, guarding the
         backbone's multilingual text ability against catastrophic forgetting. Scaled by
         `text_anchor_weight`.
 
@@ -706,7 +695,7 @@ def build_loss_fn(targs: TrainArgs) -> Callable[[Any, dict], "torch.Tensor"]:
     # onto this path for a name that is never used.
 
     # Semantic KD is delegated to the ONE shared objective (losses/kd.py) so the offline path here
-    # and the on-policy path use an identical KL -- no diverging in-file copy (ARCH 5.1, Phase 5).
+    # and the on-policy path use an identical KL -- no diverging in-file copy.
     from project_amnesty.losses import semantic_kd_loss_from_batch
 
     kd_weight = float(targs.kd_weight)
@@ -724,7 +713,7 @@ def build_loss_fn(targs: TrainArgs) -> Callable[[Any, dict], "torch.Tensor"]:
         # --- resolve model outputs against the documented I/O contract ---
         text_logits = getattr(outputs, "text_logits", None)
         if text_logits is None:
-            text_logits = getattr(outputs, "logits", None)  # fallback (ARCH 5.0.1)
+            text_logits = getattr(outputs, "logits", None)  # fallback
         if text_logits is None and isinstance(outputs, dict):
             text_logits = outputs.get("text_logits", outputs.get("logits"))
         audio_logits = getattr(outputs, "audio_logits", None)
@@ -742,7 +731,7 @@ def build_loss_fn(targs: TrainArgs) -> Callable[[Any, dict], "torch.Tensor"]:
             "terms (ARCH 5/5.1/7.6); model does not follow the I/O contract."
         )
 
-        # --- (1) audio CE over all K codebooks, per-token weighted (ARCH 7.6) ---
+        # --- (1) audio CE over all K codebooks, per-token weighted ---
         if text_anchor_batch:
             ce_audio_raw = None
         else:
@@ -753,7 +742,7 @@ def build_loss_fn(targs: TrainArgs) -> Callable[[Any, dict], "torch.Tensor"]:
                 audio_logits, batch["audio_codes"], batch["audio_loss_weight"]
             )
 
-        # --- (2) text CE (Inner Monologue), per-token weighted (ARCH 5.0.1/7.6) ---
+        # --- (2) text CE (Inner Monologue), per-token weighted ---
         assert "input_ids" in batch and "text_loss_weight" in batch, (
             "batch must carry input_ids (B,T) and text_loss_weight (B,T) (ARCH 5.0.1/7.6)."
         )
@@ -761,7 +750,7 @@ def build_loss_fn(targs: TrainArgs) -> Callable[[Any, dict], "torch.Tensor"]:
         text_w = batch["text_loss_weight"]
         # The model returns UNSHIFTED text logits: logits[t] predicts frame t+1, and the 1-step
         # autoregressive shift lives in the model's own loss_function -- which forward_with_contract
-        # bypasses by calling forward WITHOUT text_labels (ARCH 5.0.1, RISKS 7.8). So every text term
+        # bypasses by calling forward WITHOUT text_labels. So every text term
         # must reproduce that shift exactly as ForCausalLMLoss does -- logits[:-1] against
         # input_ids[1:], the weight following the TARGET frame -- or it trains a frame-late objective
         # whose loss still falls silently. Audio is deliberately NOT shifted here: the depth decoder
@@ -776,7 +765,7 @@ def build_loss_fn(targs: TrainArgs) -> Callable[[Any, dict], "torch.Tensor"]:
             text_logits_shifted, text_targets, text_w_shifted
         )
 
-        # --- (3) semantic KD KL on k=0, delegated to losses.semantic_kd_loss (ARCH 5.1, RISKS 7.4).
+        # --- (3) semantic KD KL on k=0, delegated to losses.semantic_kd_loss.
         #     Uses the REAL collator keys (`teacher_topk_val`/`teacher_topk_idx`, kd_align spec); 0
         #     when the batch carries no teacher dump (all-ko_tts batch). ---
         kd_metrics: dict[str, float] = {}
@@ -789,12 +778,12 @@ def build_loss_fn(targs: TrainArgs) -> Callable[[Any, dict], "torch.Tensor"]:
         else:
             kd_raw = None  # a batch may lack the teacher dump -> KD contributes 0
 
-        # --- (4) text anchor: light pure-text CE guarding Qwen3's multilingual ability (RISKS 7.6) ---
+        # --- (4) text anchor: light pure-text CE guarding Qwen3's multilingual ability ---
         #
-        # Gated on `batch_kind`, which is what `RoutingCollator` actually emits. The old gate read
-        # `is_text_only` -- a ROW-level field consumed inside the collators and never present on a
-        # batch -- so `anchor_raw` was always None and the term was an exact zero on every step. The
-        # single guard against catastrophic forgetting was switched off, with nothing logging it.
+        # Gated on `batch_kind`, which is what `RoutingCollator` actually emits. `is_text_only` is a
+        # ROW-level field consumed inside the collators and never present on a batch, so gating the
+        # anchor on it would leave `anchor_raw` always None and the term an exact zero on every step
+        # -- the single guard against catastrophic forgetting silently switched off.
         is_text_only = batch.get("is_text_only")
         if text_anchor_batch:
             # The whole batch is the anchor: every row is pure text, so no row mask is needed.
@@ -808,7 +797,7 @@ def build_loss_fn(targs: TrainArgs) -> Callable[[Any, dict], "torch.Tensor"]:
         else:
             anchor_raw = None
 
-        # --- combine (ARCH 5.1/7.6). Skipped terms are exact scalar zeros on the graph dtype. ---
+        # --- combine. Skipped terms are exact scalar zeros on the graph dtype. ---
         # Anchored on `text_logits`: it is the one output present on both batch kinds.
         zero = text_logits.new_zeros(())
         ce_audio = ce_weight * ce_audio_raw if ce_audio_raw is not None else zero
@@ -831,12 +820,12 @@ def build_loss_fn(targs: TrainArgs) -> Callable[[Any, dict], "torch.Tensor"]:
 
 
 def setup_fsdp2(model: "torch.nn.Module", args: TrainArgs) -> "torch.nn.Module":
-    """Wrap the backbone with `fully_shard`. The `reshard_after_forward` flag switches ZeRO-2/3 class. (3.3)
+    """Wrap the backbone with `fully_shard`. The `reshard_after_forward` flag switches ZeRO-2/3 class.
 
-    Default False: keep parameters replicated (a 9.15B bf16 copy resides on an A100 80GB), shard
-    only grad/optim state. If VRAM is tight, fall back to True to also shard parameters (ZeRO-3
-    class). bf16 mixed precision. Each transformer block is sharded individually first, then the
-    top-level module is wrapped -- compatible with Liger Kernel / FlashAttention (5.1).
+    Default False: keep parameters replicated, shard only grad/optim state. If VRAM is tight, fall
+    back to True to also shard parameters (ZeRO-3 class). bf16 mixed precision. Each transformer
+    block is sharded individually first, then the top-level module is wrapped -- compatible with
+    Liger Kernel / FlashAttention.
     """
     # bf16 mixed-precision policy is optional across torch builds; degrade gracefully if absent.
     mp_policy = None
@@ -898,12 +887,12 @@ def _find_transformer_blocks(model: "torch.nn.Module") -> list["torch.nn.Module"
 
 def build_optimizer(model: "torch.nn.Module", args: TrainArgs):
     """PagedAdamW8bit. Audio embeddings / Depth heads / Role Token (brand-new parameters) always
-    train in a full-precision group. (3.1)
+    train in a full-precision group.
 
     LoRA targets existing weight matrices, so it cannot apply to fully-new parameters like the audio
     RVQ embeddings, Depth output heads, and Role Token (two additive vectors) -> in every Phase
     these live in a separate param group and train in full. They use a separate lr
-    (`audio_param_lr`) to curb early drift (RISKS 7.5). When `full_ft=False` (Phase 4) the backbone
+    (`audio_param_lr`) to curb early drift. When `full_ft=False` (Phase 4) the backbone
     contributes only its LoRA adapters, while this new-parameter group still trains in full.
 
     "Full precision" here means the optimizer keeps 32-bit optimizer state for these parameters
@@ -958,20 +947,20 @@ def build_optimizer(model: "torch.nn.Module", args: TrainArgs):
 
 
 # ======================================================================================
-# 3. Diagnostic hooks (ARCHITECTURE 3.5/5.4, RISKS 2/3)
+# 3. Diagnostic hooks
 # ======================================================================================
 
 def run_diagnostics(model: "torch.nn.Module", outputs: Any, batch: dict, step: int) -> dict:
     """Early-warning probing during training. Instrumentation to leave failure mechanisms in an
-    "explainable state" (the purpose of the RISKS doc).
+    explainable state.
 
     - **grad-norm dominance**: compare per-group gradient norms (new-param vs backbone). If one
-      dominates, loss weights / PCGrad may need rebalancing (RISKS 2).
+      dominates, loss weights / PCGrad may need rebalancing.
     - **role-vector separation**: cosine similarity of the self/user Role Token (and Depth role
       embedding). Watch that role distinction is not diluted under other loss pressure; role
-      differentiation concentrates at the semantic level (3.5.1).
+      differentiation concentrates at the semantic level.
     - **batch-element collapse**: probe that the Depth batch-2 (self/user) elements do not collapse
-      to identical output ignoring role; measure divergence of the two batch elements (5.4). On
+      to identical output ignoring role; measure divergence of the two batch elements. On
       collapse, signal to promote the projection to two role-specific ones (split MLP).
 
     Returns a metrics dict; never raises on missing tensors (best-effort probing).
@@ -982,14 +971,14 @@ def run_diagnostics(model: "torch.nn.Module", outputs: Any, batch: dict, step: i
     # Under FSDP2 each rank owns only a shard of every parameter's grad, so a purely local sum is a
     # per-shard partial. Accumulate the per-group squared grad sums locally, then all_reduce(SUM)
     # across ranks BEFORE taking the sqrt/ratio so the reported dominance ratio is GLOBAL, not a
-    # shard artifact (fix5). Best-effort: guarded on is_initialized() and never raises.
+    # shard artifact. Best-effort: guarded on is_initialized() and never raises.
     new_sq = 0.0
     back_sq = 0.0
     for name, p in model.named_parameters():
         if p.grad is None:
             continue
         g = p.grad.detach()
-        # fix7: under FSDP2 `p.grad` is a sharded DTensor. Calling `.pow(2).sum().item()` on it
+        # Under FSDP2 `p.grad` is a sharded DTensor. Calling `.pow(2).sum().item()` on it
         # would trigger an implicit redistribution/all-reduce to materialize the global scalar --
         # and the explicit `dist.all_reduce(SUM)` below would then reduce it a SECOND time
         # (double-counting, ~sqrt(world_size)x inflation in the reported norm). Take THIS rank's
@@ -1021,19 +1010,19 @@ def run_diagnostics(model: "torch.nn.Module", outputs: Any, batch: dict, step: i
         metrics["grad_norm_ratio"] = (new_sq ** 0.5) / (back_sq ** 0.5)
 
     # --- role-vector separation (cosine similarity of the two role embeddings) ---
-    # Haan carries TWO role signals -- the Temporal one (ARCH 3.3) and the Depth one (ARCH 5.4) --
-    # and they are diagnosed separately: 3.5.1's role-collapse alarm is about the Temporal signal,
-    # while 5.4's is about the Depth signal. Reporting whichever the parameter iteration happened
-    # to reach first would silently label one as the other.
+    # Haan carries TWO role signals -- the Temporal one and the Depth one -- and they are diagnosed
+    # separately: the role-collapse alarm for the Temporal signal is distinct from the one for the
+    # Depth signal. Reporting whichever the parameter iteration happened to reach first would
+    # silently label one as the other.
     #
-    # Reported as a RELATIVE DISTANCE, `||r0 - r1|| / mean(||r0||, ||r1||)`, not the cosine ARCH 3.5
-    # names. Cosine reads the angle between two vectors, and neither mode is asking that question:
+    # Reported as a RELATIVE DISTANCE, `||r0 - r1|| / mean(||r0||, ||r1||)`, not a cosine
+    # similarity. Cosine reads the angle between two vectors, and neither mode is asking that question:
     #
     #   scale (the default)  the rows are elementwise GAINS initialised to all-ones, so cosine starts
     #                        at exactly 1.0 and barely moves -- `[1,1]` and `[4,4]` are parallel and
     #                        behave completely differently. Magnitude is the whole signal here.
     #   additive             the rows initialise to ZEROS, so cosine is 0/0 -> 0.0 at step 0 and stays
-    #                        pinned while either row is near zero. Measured: perturbing one role left
+    #                        pinned while either row is near zero -- perturbing one role would leave
     #                        the reported cosine at exactly 0.0.
     #
     # One metric for both, so the series stays comparable across an ablation that flips the mode:
@@ -1049,7 +1038,7 @@ def run_diagnostics(model: "torch.nn.Module", outputs: Any, batch: dict, step: i
                 metrics[key] = float(((self_vec - user_vec).norm() / (mean_norm + 1e-8)).item())
 
     # --- self/user output collapse: compare the ROLE axis of audio_logits (B,2,K,T,C) ---
-    # fix8: the ARCH 5.4 Depth batch-2 probe must detect self/user collapsing to identical audio
+    # The Depth batch-2 probe must detect self/user collapsing to identical audio
     # outputs. That contrast lives on the ROLE axis (dim 1: 0=self, 1=user) of `audio_logits`, NOT
     # across two batch ROWS of the text `logits` (comparing batch rows 0/1 measured unrelated
     # examples, not role separation). Compare audio_logits[:, 0] (self) vs audio_logits[:, 1] (user)
@@ -1082,8 +1071,8 @@ def _find_role_embeddings(model: "torch.nn.Module") -> "dict[str, torch.Tensor]"
     `models.haan.RoleEmbedding` names its parameter `role_scale` (role_mode="scale", the default)
     or `role_emb` (role_mode="additive"), and the model holds two of them:
 
-        role_embedding.<param>                     Temporal side  -> "role_sep"        (ARCH 3.3)
-        depth_decoder.model.role_embedding.<param> Depth side     -> "depth_role_sep"  (ARCH 5.4)
+        role_embedding.<param>                     Temporal side  -> "role_sep"
+        depth_decoder.model.role_embedding.<param> Depth side     -> "depth_role_sep"
 
     Matched by the OWNING MODULE path rather than by scanning for a "role"-ish substring, because
     the two are indistinguishable by shape and a substring scan returns whichever comes first in
@@ -1091,7 +1080,7 @@ def _find_role_embeddings(model: "torch.nn.Module") -> "dict[str, torch.Tensor]"
     metric's name. Missing entries are simply omitted (best-effort probing, never raises).
 
     Note both modes initialise to the identity, so the step-0 separation is 0.0 by construction --
-    that is expected, not collapse. The diagnostic is the TREND (RoleEmbedding docstring, 3.5.1).
+    that is expected, not collapse. The diagnostic is the TREND.
     """
     found: dict[str, torch.Tensor] = {}
     for name, p in model.named_parameters():
@@ -1145,21 +1134,20 @@ def save_checkpoint(
     epoch: int,
     args: TrainArgs,
 ) -> str:
-    """Save the full resume manifest to `out_dir/{phase}/step_{global_step}` (fix4/7/8/12).
+    """Save the full resume manifest to `out_dir/{phase}/step_{global_step}`.
 
-    Manifest (see plan §3): global_step/micro_step/epoch, model (DCP full state_dict),
-    optimizer (DCP `get_optimizer_state_dict(full_state_dict, cpu_offload)`, fix4), scheduler
-    state, sampler state (hasattr-guarded), RNG states (torch/cuda/numpy/python -- saved PER RANK
-    as `rng_rank{r}.pt` under distributed so each rank restores its own stream, fix9), and a
-    provenance JSON (world_size/grad_accum/seed/phase/schema_version) for resume-compatibility
-    checks (fix12).
+    Manifest: global_step/micro_step/epoch, model (DCP full state_dict), optimizer (DCP
+    `get_optimizer_state_dict(full_state_dict, cpu_offload)`), scheduler state, sampler state
+    (hasattr-guarded), RNG states (torch/cuda/numpy/python -- saved PER RANK as `rng_rank{r}.pt`
+    under distributed so each rank restores its own stream), and a provenance JSON
+    (world_size/grad_accum/seed/phase/schema_version) for resume-compatibility checks.
 
-    Stability (fix8): the payload is written into a sibling `<dir>.tmp` and then `os.rename`d onto
+    Stability: the payload is written into a sibling `<dir>.tmp` and then `os.rename`d onto
     the final path, so a kill mid-write cannot leave a torn checkpoint. A keep-last-N rotation
     prunes older periodic `step_*` dirs (the just-written one is always retained; gate exports made
     by runner.py under other names are untouched). All ranks participate in the (collective) state
     gathers; rank 0 writes the shared payload (state.pt / provenance / train_args) while each rank
-    writes its own `rng_rank{r}.pt` (fix9); every rank meets the closing barrier.
+    writes its own `rng_rank{r}.pt`; every rank meets the closing barrier.
     """
     phase_dir = os.path.join(args.out_dir, args.phase)
     os.makedirs(phase_dir, exist_ok=True)
@@ -1172,21 +1160,21 @@ def save_checkpoint(
     optim_sd = _gather_full_optim_state_dict(model, optimizer)
 
     rank = _dist_rank()
-    # fix9: every rank snapshots its OWN RNG (torch/cuda/numpy/python). Saving only rank 0's RNG and
-    # restoring it onto every rank (the previous behavior) collapses all ranks to an identical
-    # generator after a resume, so per-rank data augmentation / dropout stops diverging. Under real
-    # distributed each rank commits its own `rng_rank{r}.pt`; `state.pt` still carries rank 0's RNG
-    # for the single-process / backward-compatible path.
+    # Every rank snapshots its OWN RNG (torch/cuda/numpy/python). Saving only rank 0's RNG and
+    # restoring it onto every rank collapses all ranks to an identical generator after a resume, so
+    # per-rank data augmentation / dropout stops diverging. Under real distributed each rank commits
+    # its own `rng_rank{r}.pt`; `state.pt` still carries rank 0's RNG for the single-process /
+    # backward-compatible path.
     rng_state = _collect_rng_state()
 
     if rank == 0:
         _rmtree_quiet(tmp_dir)  # clear any stale tmp from a previous crash
         os.makedirs(tmp_dir, exist_ok=True)
 
-    # Barrier so the tmp dir rank 0 just created is visible before other ranks write into it (fix9).
+    # Barrier so the tmp dir rank 0 just created is visible before other ranks write into it.
     _dist_barrier()
 
-    # fix9: under genuine distributed (world_size > 1) each rank writes its own RNG file INTO the
+    # Under genuine distributed (world_size > 1) each rank writes its own RNG file INTO the
     # tmp dir, so the per-rank RNG becomes part of the atomic `tmp -> final` rename below. In the
     # single-process case (world_size == 1) we skip this entirely -- state.pt's rng is authoritative.
     if _dist_world_size() > 1:
@@ -1251,15 +1239,15 @@ def load_checkpoint(
     Accepts either the checkpoint directory or a direct `state.pt` path. Restores model (DCP
     `set_model_state_dict`), optimizer (DCP `set_optimizer_state_dict`, tolerant on param-group
     change), scheduler, sampler (`load_state_dict` + `set_step(global_step)`, hasattr-guarded) and
-    RNG states. Runs a provenance check first (fix12): world_size / grad_accum / schema mismatches
-    are warned about (they break the determinism keys of §4) but do not block the resume.
+    RNG states. Runs a provenance check first: world_size / grad_accum / schema mismatches are
+    warned about (they break the resume's determinism keys) but do not block the resume.
 
-    fix3: `epoch` and `micro_step` are already saved in the manifest but were previously dropped on
-    load, so a resume silently restarted the epoch loop at 0 and reset the micro-batch counter.
-    They are now restored and RETURNED (as a 3-tuple with `global_step`) so `train_loop` can resume
-    the epoch loop and grad-accumulation cursor at the exact position the checkpoint captured.
-    fix9: RNG is restored PER RANK from `rng_rank{r}.pt` when present (each rank its own stream),
-    falling back to the shared rng embedded in state.pt for single-process / legacy checkpoints.
+    `epoch` and `micro_step` are saved in the manifest and restored and RETURNED (as a 3-tuple with
+    `global_step`) so `train_loop` can resume the epoch loop and grad-accumulation cursor at the
+    exact position the checkpoint captured -- without them a resume silently restarts the epoch loop
+    at 0 and resets the micro-batch counter.
+    RNG is restored PER RANK from `rng_rank{r}.pt` when present (each rank its own stream), falling
+    back to the shared rng embedded in state.pt for single-process / legacy checkpoints.
     """
     state_path = path
     if os.path.isdir(path):
@@ -1275,7 +1263,7 @@ def load_checkpoint(
             pass
         return 0, 0, 0
 
-    # Provenance check (fix12) -- warn on determinism-key changes, then proceed tolerantly.
+    # Provenance check -- warn on determinism-key changes, then proceed tolerantly.
     _check_provenance(os.path.dirname(state_path), args)
 
     _set_model_state_dict(model, payload["model"])
@@ -1292,11 +1280,11 @@ def load_checkpoint(
             pass
 
     global_step = int(payload.get("global_step", payload.get("step", 0)))
-    # fix3: restore the epoch / micro-batch cursor (already in the manifest) for a faithful resume.
+    # restore the epoch / micro-batch cursor (already in the manifest) for a faithful resume.
     epoch = int(payload.get("epoch", 0))
     micro_step = int(payload.get("micro_step", 0))
     _restore_sampler(loader, payload.get("sampler"), global_step)  # sampler cursor + set_step
-    _restore_rng_for_rank(os.path.dirname(state_path), payload.get("rng"))  # fix9: per-rank rng
+    _restore_rng_for_rank(os.path.dirname(state_path), payload.get("rng"))  # per-rank rng
     return global_step, epoch, micro_step
 
 
@@ -1306,7 +1294,7 @@ def load_checkpoint(
 # --------------------------------------------------------------------------------------
 
 def _warn_if_distributed_partial(what: str, err: Exception) -> None:
-    """fix6: warn LOUDLY when a DCP full-gather fails under real distributed (world_size > 1).
+    """Warn LOUDLY when a DCP full-gather fails under real distributed (world_size > 1).
 
     The plain `module.state_dict()` fallback returns only THIS rank's local shard under FSDP2, so
     silently saving it would produce a shard-only, non-resumable checkpoint (each rank clobbering
@@ -1341,7 +1329,7 @@ def _gather_full_state_dict(model: "torch.nn.Module") -> dict:
             model, options=StateDictOptions(full_state_dict=True, cpu_offload=True)
         )
     except Exception as e:
-        # fix6: never SILENTLY save a shard-only model under distributed.
+        # never SILENTLY save a shard-only model under distributed.
         _warn_if_distributed_partial("_gather_full_state_dict", e)
         try:
             return model.state_dict()
@@ -1350,7 +1338,7 @@ def _gather_full_state_dict(model: "torch.nn.Module") -> dict:
 
 
 def _gather_full_optim_state_dict(model: "torch.nn.Module", optimizer: Any) -> "dict | None":
-    """Return a full (unsharded) optimizer state_dict via DCP (fix4), CPU-offloaded on rank 0.
+    """Return a full (unsharded) optimizer state_dict via DCP, CPU-offloaded on rank 0.
 
     The sharded optimizer state of an FSDP2 run is not portable on its own; DCP's
     `get_optimizer_state_dict(full_state_dict=True, cpu_offload=True)` gathers the 8-bit/32-bit
@@ -1369,7 +1357,7 @@ def _gather_full_optim_state_dict(model: "torch.nn.Module", optimizer: Any) -> "
             model, optimizer, options=StateDictOptions(full_state_dict=True, cpu_offload=True)
         )
     except Exception as e:
-        # fix6: never SILENTLY save a shard-only optimizer state under distributed.
+        # never SILENTLY save a shard-only optimizer state under distributed.
         _warn_if_distributed_partial("_gather_full_optim_state_dict", e)
         try:
             return optimizer.state_dict()
@@ -1398,9 +1386,8 @@ def _set_model_state_dict(model: "torch.nn.Module", sd: dict) -> None:
 def _set_optim_state_dict(model: "torch.nn.Module", optimizer: Any, sd: dict) -> None:
     """Load a full optimizer state_dict via DCP `set_optimizer_state_dict`, else plain load.
 
-    Tolerant (fix12): after a param-group change (Full-FT <-> LoRA/freeze phase transition) the
-    optimizer state legitimately mismatches; any failure resumes model weights only, exactly like
-    the previous implementation.
+    Tolerant: after a param-group change (Full-FT <-> LoRA/freeze phase transition) the
+    optimizer state legitimately mismatches; any failure resumes model weights only.
     """
     try:
         from torch.distributed.checkpoint.state_dict import (  # noqa: PLC0415
@@ -1446,7 +1433,7 @@ def _restore_sampler(loader: Any, sampler_state: Any, global_step: int) -> None:
     matching `_get_sampler_state`/`state_dict` captured, restoring the MixingBatchSampler cursor).
     Fall back to a direct `loader.sampler.load_state_dict` + `set_step(global_step)` for a plain
     DataLoader / stub loader. Every hook is hasattr-guarded, so a loader without a sampler (or
-    without these methods) is a silent no-op (plan §7 stub guard).
+    without these methods) is a silent no-op.
     """
     if sampler_state is not None and hasattr(loader, "load_state_dict"):
         try:
@@ -1519,10 +1506,10 @@ def _restore_rng_state(rng: Any) -> None:
 
 
 def _restore_rng_for_rank(ckpt_dir: str, fallback_rng: Any) -> None:
-    """fix9: restore THIS rank's own `rng_rank{r}.pt` if present, else the shared rng from state.pt.
+    """Restore THIS rank's own `rng_rank{r}.pt` if present, else the shared rng from state.pt.
 
     Under distributed, `save_checkpoint` writes one RNG file per rank, so each rank restores exactly
-    the generator state IT held at checkpoint time -- combined with fix2's per-rank seeding this
+    the generator state IT held at checkpoint time -- combined with the per-rank seeding this
     keeps the ranks' RNG streams decorrelated across a resume instead of collapsing them onto rank
     0's state. Single-process runs and legacy checkpoints have no per-rank file and fall back to the
     rng embedded in state.pt. Best-effort and never raises.
@@ -1539,11 +1526,10 @@ def _restore_rng_for_rank(ckpt_dir: str, fallback_rng: Any) -> None:
 
 
 def _schema_version() -> int:
-    """Dataset SCHEMA_VERSION from `project_amnesty.datasets.schema`, or 0 when absent (plan §3).
+    """Dataset SCHEMA_VERSION from `project_amnesty.datasets.schema`, or 0 when absent.
 
-    The module moved from the old top-level `data_pipeline` package; the stale import silently
-    hit the `except` and pinned every provenance record to schema_version=0, which disabled the
-    dataset-layout half of `_check_provenance`.
+    A failed import silently hits the `except` and pins every provenance record to
+    schema_version=0, which disables the dataset-layout half of `_check_provenance`.
     """
     try:
         from project_amnesty.datasets.schema import SCHEMA_VERSION  # noqa: PLC0415
@@ -1554,9 +1540,9 @@ def _schema_version() -> int:
 
 
 def _check_provenance(ckpt_dir: str, args: TrainArgs) -> None:
-    """Warn (never block) when a resume changes a determinism key vs the saved provenance (fix12).
+    """Warn (never block) when a resume changes a determinism key vs the saved provenance.
 
-    `world_size` and `grad_accum` feed the §4 determinism keys (group draw `rng(seed, step)`, step
+    `world_size` and `grad_accum` feed the determinism keys (group draw `rng(seed, step)`, step
     cadence), and `schema_version` guards dataset layout; a mismatch means the resumed data stream
     is not byte-identical, so we surface a clear warning and rely on the tolerant optimizer load.
     """
@@ -1605,7 +1591,7 @@ def _rmtree_quiet(path: str) -> None:
 
 
 def _rotate_checkpoints(phase_dir: str, keep: int, keep_dir: str) -> None:
-    """Keep the newest `keep` periodic `step_*` dirs; prune older ones and any stale `*.tmp` (fix8).
+    """Keep the newest `keep` periodic `step_*` dirs; prune older ones and any stale `*.tmp`.
 
     `keep_dir` (the just-written checkpoint) is always retained even if `keep` would drop it. Only
     `step_*` directories are considered, so gate/full exports runner.py writes under other names are
@@ -1681,12 +1667,12 @@ def _dist_barrier() -> None:
 
 
 def _init_distributed() -> bool:
-    """Guarded process-group init at `main` entry (fix2). Returns True iff this call started a group.
+    """Guarded process-group init at `main` entry. Returns True iff this call started a group.
 
     Only initializes when the launcher exported WORLD_SIZE/RANK (i.e. torchrun) and no group is up
     yet: on CUDA it pins the local device with `set_device(LOCAL_RANK)` then `init_process_group`s
     NCCL; on CPU it uses Gloo. A plain single-process CPU smoke (no env vars) is a no-op, so import
-    / py_compile / CPU runs are unaffected (plan §7 stub guard). Never raises.
+    / py_compile / CPU runs are unaffected. Never raises.
     """
     try:
         if not dist.is_available() or dist.is_initialized():
@@ -1707,7 +1693,7 @@ def _init_distributed() -> bool:
 
 
 def _shutdown_distributed(started: bool) -> None:
-    """Tear down the process group iff `_init_distributed` started it (fix2). No-op otherwise."""
+    """Tear down the process group iff `_init_distributed` started it. No-op otherwise."""
     if not started:
         return
     try:
@@ -1718,7 +1704,7 @@ def _shutdown_distributed(started: bool) -> None:
 
 
 def _assert_optim_precision(model: "torch.nn.Module", optimizer: Any) -> dict:
-    """Best-effort check that sensitive new params keep float32 optimizer state (fix9).
+    """Best-effort check that sensitive new params keep float32 optimizer state.
 
     The 8-bit optimizer must NOT quantize the brand-new audio-embedding / Depth-head / Role-Token
     params -- `build_optimizer` registers a 32-bit bitsandbytes override for them. If that override
@@ -1727,8 +1713,8 @@ def _assert_optim_precision(model: "torch.nn.Module", optimizer: Any) -> dict:
 
     Called once before the loop, so `optimizer.state` is usually still empty (bnb populates it on
     the first step); this stays best-effort -- it warns and returns a summary rather than raising on
-    CPU/stub or when bnb state is absent. The authoritative verification is a real 4xA100 run right
-    after step 1 (plan §8).
+    CPU/stub or when bnb state is absent. Authoritative verification requires a real multi-GPU run
+    right after the first step.
     """
     summary = {"checked": 0, "float32": 0, "nonfloat32": 0, "missing_state": 0}
     state = getattr(optimizer, "state", None)
@@ -1781,10 +1767,10 @@ def _to_device(batch: Any, device: "torch.device") -> Any:
 
 
 def _set_audio_emb_requires_grad(model: "torch.nn.Module", flag: bool) -> int:
-    """Freeze/unfreeze the audio input embeddings (the optional early-freeze warmup, 7.5).
+    """Freeze/unfreeze the audio input embeddings (the optional early-freeze warmup).
 
     Matches `embed_tokens.*` at the TOP level only (AUDIO_EMB_PREFIXES) -- the model's K shared
-    audio tables (ARCH 3.3). Deliberately not the backbone's text table (`model.embed_tokens`)
+    audio tables. Deliberately not the backbone's text table (`model.embed_tokens`)
     nor the Depth decoder's own input tables (`depth_decoder.model.embed_tokens`), neither of
     which this warmup is about. Returns how many parameters were touched so the caller can tell
     a real freeze from a silent no-op.
@@ -1801,10 +1787,10 @@ def _set_audio_emb_requires_grad(model: "torch.nn.Module", flag: bool) -> int:
 def _apply_scheduled_sampling(
     model: "torch.nn.Module", batch: dict, args: TrainArgs, global_step: int
 ) -> dict:
-    """Scheduled-sampling self-rollout to correct exposure bias (RISKS 7.3). ONLY reached when
+    """Scheduled-sampling self-rollout to correct exposure bias. ONLY reached when
     `on_policy_ratio > 0`; the `== 0` path never calls this, so it stays byte-for-byte unchanged.
 
-    INPUT vs TARGET contract (fix4): `batch['audio_codes']` is the ground-truth Mimi code tensor
+    INPUT vs TARGET contract: `batch['audio_codes']` is the ground-truth Mimi code tensor
     that the audio-CE loss supervises against -- it MUST stay untouched, otherwise the model would
     be trained to predict its OWN (possibly wrong) rollout instead of the GT (a corrupted target).
     Scheduled sampling only changes what the model CONDITIONS on, so the self-rollout is written to
@@ -1815,20 +1801,20 @@ def _apply_scheduled_sampling(
     stream) is overwritten, so the leading GT context is preserved and the model still receives real
     history before switching to its own predictions.
 
-    fix5 (KD validity): the offline `teacher_topk_*` dump is computed on the GT trajectory, so for any
+    KD validity: the offline `teacher_topk_*` dump is computed on the GT trajectory, so for any
     (row, trailing-frame) position that we splice with the rollout it is an INVALID teacher -- the
     student output there is now rollout-conditioned. We set `kd_valid=False` for those positions so
     the KD KL never scores a rollout-conditioned student against a GT-trajectory teacher. Both role
     outputs at the spliced frames are conditioned on the modified self stream, so both are
-    invalidated. True on-policy KD would need a LIVE teacher re-inferred on the rollout (future work,
-    RISKS 7.3); until then those frames simply drop out of the KD term.
+    invalidated. True on-policy KD would need a LIVE teacher re-inferred on the rollout (future
+    work); until then those frames simply drop out of the KD term.
 
     Minimal and guarded: returns the batch unchanged whenever nothing can be spliced (no rows
     selected, no `audio_codes`, or `generate` yields no `codes`). Requires `model.generate` -- a real
     model per the I/O contract exposes it; its absence under on-policy is a contract violation and
     raises.
 
-    fix11 (determinism on resume): the per-row Bernoulli selection is drawn from a LOCAL
+    Determinism on resume: the per-row Bernoulli selection is drawn from a LOCAL
     `torch.Generator` seeded on `(args.seed, global_step)` rather than the global RNG, so the exact
     same rows are selected when a run resumes at the same `global_step` -- the on-policy decision is
     reproducible and independent of how many global RNG draws happened before the crash.
@@ -1839,11 +1825,11 @@ def _apply_scheduled_sampling(
 
     ratio = min(max(float(args.on_policy_ratio), 0.0), 1.0)
     B, R, K, T = audio_codes.shape
-    # Trailing conditioning window: replace only the tail, never the whole stream (fix4). Bounding
+    # Trailing conditioning window: replace only the tail, never the whole stream. Bounding
     # the rollout to the second half keeps a leading block of real GT history as context.
     cond_len = max(1, T // 2)
     # Reproducible per-(seed, step) selection: a local Generator keyed on the step keeps the choice
-    # identical across a resume without perturbing the global RNG stream (fix11).
+    # identical across a resume without perturbing the global RNG stream.
     gen = torch.Generator(device=audio_codes.device)
     gen.manual_seed((int(args.seed) * 1_000_003 + int(global_step)) & 0x7FFF_FFFF_FFFF_FFFF)
     sel = torch.rand(B, generator=gen, device=audio_codes.device) < ratio  # per-row Bernoulli ~ ratio
@@ -1867,14 +1853,14 @@ def _apply_scheduled_sampling(
     rows = sel.nonzero(as_tuple=False).flatten()
     spliced = dict(batch)
 
-    # fix4: build the INPUT conditioning tensor as a clone of the GT codes and splice the rollout
+    # build the INPUT conditioning tensor as a clone of the GT codes and splice the rollout
     # into ONLY the trailing L self-frames (codebooks 0..k-1) of the selected rows. LHS and RHS are
     # both (n_selected, k, L). The GT `audio_codes` (the CE target) is left entirely untouched.
     input_codes = audio_codes.clone()
     input_codes[rows, 0, :k, T - L:] = gen_self[rows, :k, gen_self.shape[-1] - L:].to(input_codes.dtype)
     spliced["input_audio_codes"] = input_codes
 
-    # fix5: invalidate the offline GT-trajectory teacher for the rollout-conditioned frames of the
+    # invalidate the offline GT-trajectory teacher for the rollout-conditioned frames of the
     # selected rows (both roles) so KD never scores a rollout-conditioned student against it.
     kd_valid = batch.get("kd_valid")
     if isinstance(kd_valid, torch.Tensor) and kd_valid.dim() == 3 and kd_valid.shape[-1] == T:
@@ -1896,7 +1882,7 @@ def train_loop(
     start_epoch: int = 0,
     start_micro: int = 0,
 ) -> None:
-    """Canonical PyTorch loop + LR schedule + combined KD/CE + diagnostics + ckpt/logging (§2).
+    """Canonical PyTorch loop + LR schedule + combined KD/CE + diagnostics + ckpt/logging.
 
     Control flow (fully implemented; the pieces that need models/datasets are `model`, `loader`,
     `loss_fn`, which are passed in):
@@ -1905,22 +1891,22 @@ def train_loop(
           for each batch in loader.loader:                # the bundle's DataLoader (falls back to loader)
             batch -> device
             outputs = forward_with_contract(model, batch)   # adapter: collator batch -> Moshi signature
-            total_loss, metrics = loss_fn(outputs, batch)  # KD + CE + anchor (5.1/7.6)
+            total_loss, metrics = loss_fn(outputs, batch)  # KD + CE + anchor
             (total_loss / grad_accum).backward()
             on accumulation boundary: clip grad -> optimizer.step() -> scheduler.step() -> zero_grad()
             periodic: run_diagnostics / log / save_checkpoint
 
-    `global_step` counts optimizer steps and starts at `start_step` (resume, fix7); `micro_step`
+    `global_step` counts optimizer steps and starts at `start_step` (resume); `micro_step`
     counts micro-batches (backward calls) and resumes at `start_micro`; the epoch loop resumes at
-    `start_epoch` (fix3), so `loader.set_epoch(epoch)` re-seats the LoaderBundle's datasets + sampler
+    `start_epoch`, so `loader.set_epoch(epoch)` re-seats the LoaderBundle's datasets + sampler
     RNG on the epoch the checkpoint captured rather than restarting at 0. The LR schedule advances with
-    `scheduler.step()` AFTER `optimizer.step()`, once per optimizer step (fix1); `lr` is logged from
+    `scheduler.step()` AFTER `optimizer.step()`, once per optimizer step; `lr` is logged from
     `scheduler.get_last_lr()`. Notes: if `freeze_audio_emb_steps` > 0 the audio embeddings are
-    frozen for the first N steps then unfrozen (RISKS 7.5); the scheduler still advances the (frozen)
+    frozen for the first N steps then unfrozen; the scheduler still advances the (frozen)
     group's LR during that window, which is intentional. `on_policy_ratio` > 0 mixes in self-rollout
-    via scheduled sampling (RISKS 7.3); the `== 0` default path is byte-for-byte unchanged.
+    via scheduled sampling; the `== 0` default path is byte-for-byte unchanged.
     """
-    # fix2: seed ONLY a fresh run. On resume (start_step > 0) the RNG restored by load_checkpoint
+    # Seed ONLY a fresh run. On resume (start_step > 0) the RNG restored by load_checkpoint
     # must win -- re-seeding here would clobber the restored generator and desynchronize on-the-fly
     # data augmentation / dropout. Seed per-rank-decorrelated (`seed + rank`) so multi-rank runs do
     # not all draw the identical RNG stream.
@@ -1935,7 +1921,7 @@ def train_loop(
         frozen = _set_audio_emb_requires_grad(model, False)
         if frozen == 0 and _dist_rank() == 0:
             # A silent no-op here reads as "the warmup ran" while the embeddings trained from
-            # step 0 -- exactly the drift RISKS 7.5 asks for the warmup to prevent.
+            # step 0 -- exactly the drift the warmup is meant to prevent.
             print(
                 f"[warn] freeze_audio_emb_steps={args.freeze_audio_emb_steps} but no parameter "
                 f"matched {AUDIO_EMB_PREFIXES}; the audio embeddings were NOT frozen. The model "
@@ -1944,11 +1930,11 @@ def train_loop(
             )
 
     global_step = int(start_step)
-    micro_step = int(start_micro)  # fix3: resume the grad-accumulation cursor, not reset to 0
-    epoch = int(start_epoch)       # fix3: default in case the epoch range is empty
+    micro_step = int(start_micro)  # resume the grad-accumulation cursor, not reset to 0
+    epoch = int(start_epoch)       # default in case the epoch range is empty
     optimizer.zero_grad(set_to_none=True)
 
-    # fix3: resume the epoch loop at the restored epoch. `max(start_epoch + 1, args.epochs)` keeps
+    # Resume the epoch loop at the restored epoch. `max(start_epoch + 1, args.epochs)` keeps
     # the fresh-run behavior identical (start_epoch=0 -> range(0, max(1, epochs))) while guaranteeing
     # the resumed epoch still runs even if `epochs` was lowered.
     for epoch in range(int(start_epoch), max(int(start_epoch) + 1, int(args.epochs))):
@@ -1973,7 +1959,7 @@ def train_loop(
             if args.freeze_audio_emb_steps > 0 and global_step == args.freeze_audio_emb_steps:
                 _set_audio_emb_requires_grad(model, True)
 
-            # Scheduled-sampling self-rollout (RISKS 7.3 exposure-bias correction). Engaged ONLY
+            # Scheduled-sampling self-rollout (exposure-bias correction). Engaged ONLY
             # when on_policy_ratio > 0; the == 0 default path skips this entirely and reaches the
             # forward below with `batch` byte-for-byte unchanged (no RNG draw, no model.generate).
             if args.on_policy_ratio > 0 and isinstance(batch, dict):
@@ -1992,14 +1978,13 @@ def train_loop(
 
             # --- optimizer step on accumulation boundary ---
             if micro_step % args.grad_accum == 0:
-                # fix6: on a real FSDP2 run `model.parameters()` are DTensors, and modern torch
+                # On a real FSDP2 run `model.parameters()` are DTensors, and modern torch
                 # `clip_grad_norm_` computes a DTensor-aware GLOBAL norm across shards (not a
-                # per-shard local norm). This is a real-hardware verification point (plan §5): if a
-                # given torch build clipped only the local shard, a manual all_reduce of the squared
-                # norm would be needed here.
+                # per-shard local norm). If a given torch build clipped only the local shard, a
+                # manual all_reduce of the squared norm would be needed here.
                 grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
                 optimizer.step()
-                # fix1: advance the LR schedule once per optimizer step, AFTER optimizer.step().
+                # advance the LR schedule once per optimizer step, AFTER optimizer.step().
                 if scheduler is not None and hasattr(scheduler, "step"):
                     scheduler.step()
                 optimizer.zero_grad(set_to_none=True)
@@ -2054,7 +2039,7 @@ def _log(step: int, metrics: dict, args: TrainArgs, tag: str = "train") -> None:
 # ======================================================================================
 
 def _overlay_cli_over_config(argv: list, dataclasses_: tuple) -> None:
-    """fix1: overlay `--<field> <value>` argv tokens onto the JSON-parsed dataclasses, in place.
+    """Overlay `--<field> <value>` argv tokens onto the JSON-parsed dataclasses, in place.
 
     `HfArgumentParser.parse_json_file` reads ONLY the config file and ignores every other argv
     token, so runner.py's `--config cfg --resume dir --out_dir od --phase name` would silently drop
@@ -2115,10 +2100,9 @@ def parse_args() -> tuple[ModelArgs, DataArgs, TrainArgs]:
     """Parse (ModelArgs, DataArgs, TrainArgs) with HfArgumentParser. `--config X.json` loads JSON.
 
     Convention (HF run_clm.py): a single `--config configs/phase2_joint.json` reads the fields from
-    JSON; otherwise fields are parsed from command-line flags. Config is JSON only (no yaml,
-    filemap.md fixed rule).
+    JSON; otherwise fields are parsed from command-line flags. Config is JSON only (no yaml).
 
-    fix1 (config + argv overlay): with `--config`, `HfArgumentParser.parse_json_file` reads only the
+    Config + argv overlay: with `--config`, `HfArgumentParser.parse_json_file` reads only the
     JSON and drops every other flag. runner.py drives phases by threading
     `['--config', cfg, '--resume', dir, '--out_dir', od, '--phase', name]`, so after the JSON parse
     we OVERLAY any `--<field> <value>` tokens still in argv onto the parsed dataclasses. That makes
@@ -2133,7 +2117,7 @@ def parse_args() -> tuple[ModelArgs, DataArgs, TrainArgs]:
         i = argv.index("--config")
         config_path = argv[i + 1]
         margs, dargs, targs = parser.parse_json_file(json_file=config_path)
-        # fix1: honor CLI flags threaded alongside --config (runner's --resume/--out_dir/--phase).
+        # honor CLI flags threaded alongside --config (runner's --resume/--out_dir/--phase).
         _overlay_cli_over_config(argv, (margs, dargs, targs))
     else:
         margs, dargs, targs = parser.parse_args_into_dataclasses()
@@ -2141,29 +2125,29 @@ def parse_args() -> tuple[ModelArgs, DataArgs, TrainArgs]:
 
 
 def main() -> None:
-    """Entry point (plan §1). Order matters for correctness -- notably wrap -> build_optimizer so the
-    32-bit optimizer override lands on the wrapped param identities (fix9), and gradient
-    checkpointing enabled BEFORE the FSDP2 wrap (fix3).
+    """Entry point. Order matters for correctness -- notably wrap -> build_optimizer so the
+    32-bit optimizer override lands on the wrapped param identities, and gradient
+    checkpointing enabled BEFORE the FSDP2 wrap.
 
-    parse -> _init_distributed (fix2) -> build_model -> gradient_checkpointing_enable (fix3) ->
-    setup_fsdp2 -> build_optimizer (fix9) -> get_scheduler (fix1) -> build_dataloader ->
-    [load_checkpoint if resume (fix7/12)] -> _assert_optim_precision (fix9) -> train_loop, with a
-    guaranteed `_shutdown_distributed` in `finally` (fix2). Usually runner.py drives this per phase.
+    parse -> _init_distributed -> build_model -> gradient_checkpointing_enable ->
+    setup_fsdp2 -> build_optimizer -> get_scheduler -> build_dataloader ->
+    [load_checkpoint if resume] -> _assert_optim_precision -> train_loop, with a
+    guaranteed `_shutdown_distributed` in `finally`. Usually runner.py drives this per phase.
     """
     # `get_scheduler` is imported lazily here (not at module top): transformers is not a dependency
-    # of the CPU import/py_compile smoke, and this module must import with torch alone (plan §7).
+    # of the CPU import/py_compile smoke, and this module must import with torch alone.
     from transformers import get_scheduler  # noqa: PLC0415
 
     margs, dargs, targs = parse_args()
 
-    dist_started = _init_distributed()  # fix2: guarded env(WORLD_SIZE/RANK) init, no-op single-process
+    dist_started = _init_distributed()  # guarded env(WORLD_SIZE/RANK) init, no-op single-process
     try:
         # build_model raises NotImplementedError until the models/ forward + warm-start land
         # (datasets/ and losses/ are already real); everything wrapped around it -- FSDP2,
         # optimizer, scheduler, resume, the loop -- is real.
         model = build_model(margs, targs)
 
-        # fix3: enable activation (gradient) checkpointing BEFORE the FSDP2 wrap. hasattr/try guarded
+        # Enable activation (gradient) checkpointing BEFORE the FSDP2 wrap. hasattr/try guarded
         # so a stub model without the hook (or an older signature) does not break import/CPU runs.
         if targs.gradient_checkpointing and hasattr(model, "gradient_checkpointing_enable"):
             try:
@@ -2174,8 +2158,8 @@ def main() -> None:
                 model.gradient_checkpointing_enable()  # older signature without the kwargs arg
 
         model = setup_fsdp2(model, targs)               # fully_shard + bf16 MixedPrecisionPolicy
-        optimizer = build_optimizer(model, targs)       # fix9: wrap -> build -> 32-bit override identity
-        scheduler = get_scheduler(                      # fix1: warmup + cosine, unit = optimizer step
+        optimizer = build_optimizer(model, targs)       # wrap -> build -> 32-bit override identity
+        scheduler = get_scheduler(                      # warmup + cosine, unit = optimizer step
             targs.lr_scheduler_type,
             optimizer,
             num_warmup_steps=targs.warmup_steps,
@@ -2188,7 +2172,7 @@ def main() -> None:
         start_epoch = 0
         start_micro = 0
         if targs.resume:
-            # fix3: load_checkpoint now returns (global_step, epoch, micro_step); thread all three
+            # load_checkpoint returns (global_step, epoch, micro_step); thread all three
             # into the loop so a resume continues at the exact epoch / grad-accum cursor.
             start_step, start_epoch, start_micro = load_checkpoint(
                 model, optimizer, scheduler, loader, targs.resume, targs
@@ -2200,13 +2184,13 @@ def main() -> None:
                 tag="resume",
             )
 
-        _assert_optim_precision(model, optimizer)       # fix9: sensitive-param exp_avg dtype check
+        _assert_optim_precision(model, optimizer)       # sensitive-param exp_avg dtype check
         train_loop(
             model, loader, optimizer, scheduler, loss_fn, targs,
             start_step=start_step, start_epoch=start_epoch, start_micro=start_micro,
         )
     finally:
-        _shutdown_distributed(dist_started)             # fix2: destroy the group we started
+        _shutdown_distributed(dist_started)             # destroy the group we started
 
 
 if __name__ == "__main__":

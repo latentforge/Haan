@@ -1,49 +1,53 @@
-"""Haan processor -- subclasses the Moshi processor from `transformers`.
+"""Haan processor and tokenizer.
 
-Inherits everything from [`MoshiProcessor`] (Mimi codec, dual audio streams, text
-padded to one token per audio frame) and changes exactly one thing: which id fills the
-text stream between enunciations.
+`HaanTokenizer` subclasses the Qwen2 tokenizer (Qwen3 reuses `Qwen2Tokenizer`) and adds a `<pad>`
+token used to fill the text stream between enunciations (Moshi's tokenizer carries `<pad>`;
+Qwen3's does not). `<pad>` gets its own id and does not reuse Qwen3's `<|endoftext|>` (its
+pad/bos/eos token) or the ChatML markers.
 
-Scope note. The Zone A / B / C instruction template (voice-prompt segment, role text, and
-the dialogue body) is *not* built here -- the collator assembles `[Zone A | Zone B | Zone C]`
-per batch so the voice prompt can vary per epoch. What the processor owns is the token
-contract those layers share.
+`HaanProcessor` subclasses [`MoshiProcessor`] (Mimi codec, dual audio streams, text padded to one
+token per audio frame) and uses `<pad>` as the id that fills the text stream between enunciations.
 """
 
 from transformers.models.moshi.processing_moshi import MoshiProcessor
+from transformers.models.qwen2.tokenization_qwen2 import Qwen2Tokenizer
 
-__all__ = ["HaanProcessor"]
+__all__ = ["HaanProcessor", "HaanTokenizer"]
+
+STREAM_PAD_TOKEN = "<pad>"
+
+
+class HaanTokenizer(Qwen2Tokenizer):
+    """Qwen3 tokenizer (`Qwen2Tokenizer`) plus a `<pad>` text-stream fill token."""
+
+    stream_pad_token = STREAM_PAD_TOKEN
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Add the text-stream fill token if the loaded vocab does not already carry it.
+        if self.stream_pad_token not in self.get_vocab():
+            self.add_special_tokens({"additional_special_tokens": [self.stream_pad_token]})
+
+    @property
+    def stream_pad_id(self) -> int:
+        """Id of the text-stream PAD token (`<pad>`)."""
+        return self.convert_tokens_to_ids(self.stream_pad_token)
 
 
 class HaanProcessor(MoshiProcessor):
-    r"""Mimi codec + Qwen3 tokenizer, with Moshi's stream PAD kept distinct from batch padding.
+    r"""Mimi codec + Haan tokenizer.
 
-    Everything here turns on one distinction that Moshi's tokenizers make for free and
-    Qwen3's does not:
-
-      - **stream PAD** -- "not speaking, session continues". It fills roughly 65% of the
-        text channel, is a prediction target, and is down-weighted (x0.3) rather than
-        masked.
-      - **batch pad** -- length alignment across a batch. Masked out of the loss entirely.
-
-    Qwen3 has no spare `<pad>`, and HF convention points `pad_token_id` at `<|im_end|>`.
-    Inheriting `MoshiProcessor._pad_token_id` unchanged would therefore fill the stream
-    with the *end-of-message* token -- the exact failure this class exists to prevent: a
-    token that means "generation over" would come to occupy 65% of the text channel and
-    overwrite the instruction-following behaviour the Qwen3 backbone was chosen for.
-
-    So the stream PAD is passed in explicitly. It must be a newly assigned reserved slot,
-    never `<|im_end|>` / `<|im_start|>`.
+    The text stream is padded to one token per audio frame; frames with no word being spoken are
+    filled with the `<pad>` token (added to the Qwen3 tokenizer by `HaanTokenizer`).
 
     Args:
-        stream_pad_id (`int`, *optional*):
-            Id of the stream PAD token (`configs/tokens.yaml: text_pad_id`).
         stream_epad_id (`int`, *optional*):
-            Id of the EPAD token (`configs/tokens.yaml: text_epad_id`), inserted one frame
-            before a word starts. Carried here so the collator and the processor read one
-            source of truth; the processor itself does not insert it, since EPAD placement
-            needs word-level timestamps.
+            Id of the EPAD token, inserted one frame before a word starts. Carried here so the
+            collator reads one definition of it; the processor does not insert it, since EPAD
+            placement needs word-level timestamps.
     """
+
+    stream_pad_token = STREAM_PAD_TOKEN
 
     def __init__(
         self,
@@ -51,86 +55,11 @@ class HaanProcessor(MoshiProcessor):
         tokenizer,
         audio_tokenizer,
         num_codebooks=8,
-        stream_pad_id: int | None = None,
         stream_epad_id: int | None = None,
     ):
-        self.stream_pad_id = stream_pad_id
         self.stream_epad_id = stream_epad_id
         super().__init__(feature_extractor, tokenizer, audio_tokenizer, num_codebooks=num_codebooks)
 
     def _pad_token_id(self) -> int:
-        """The id used to fill the text stream between enunciations.
-
-        Overrides Moshi's `pad_token_id` -> `<pad>` lookup, which on a Qwen3 tokenizer would
-        resolve to the end-of-message token. Fails loudly instead of falling back: a silently
-        wrong id here does not crash, it just quietly trains the wrong turn-boundary behaviour.
-        """
-        if self.stream_pad_id is None:
-            raise ValueError(
-                "`stream_pad_id` is unset, so the text stream cannot be padded. The stream PAD is a "
-                "distinct token from the batch pad: assign it to a reserved Qwen3 slot and pass it here, "
-                "rather than reusing `<|im_end|>`/`<|im_start|>`. Source of truth: "
-                "`configs/tokens.yaml: text_pad_id`."
-            )
-        banned = self._banned_stream_pad_ids()
-        if self.stream_pad_id in banned:
-            raise ValueError(
-                f"`stream_pad_id={self.stream_pad_id}` is {banned[self.stream_pad_id]}, which cannot also be the "
-                "stream PAD. The stream PAD marks 'not speaking, session continues' and fills ~65% of the text "
-                "channel as a down-weighted prediction target; these tokens mean 'this is over' and are either "
-                "masked out of the loss (batch pad) or terminate generation. Reusing one overwrites that "
-                "association across most of the channel and damages the very instruction-following the Qwen3 "
-                "backbone was chosen for. Assign a reserved slot instead."
-            )
-
-        if self.stream_pad_id < 0:
-            raise ValueError(f"`stream_pad_id={self.stream_pad_id}` must be non-negative.")
-
-        # No UPPER bound is checked here, deliberately. The stream PAD is meant to live in a
-        # reserved slot -- an embedding row that exists but carries no token (Qwen3-8B has 151936
-        # rows for 151669 tokens, and `configs/tokens.yaml` uses three of that gap). Only the MODEL
-        # knows how many rows there are, and a processor must not have to be told: it is a data-side
-        # object, and reaching for `config.vocab_size` here would invert the dependency. Bounding by
-        # `len(tokenizer)` instead is worse than not checking -- it rejects every reserved slot that
-        # exists, i.e. exactly what the docstring above tells the caller to assign.
-        #
-        # What the tokenizer alone CAN settle is the direction that actually corrupts training:
-        # below `len(tokenizer)` the id is a token the backbone was already trained on, and filling
-        # ~65% of the text channel with it overwrites whatever it meant. Same damage as reusing
-        # `<|im_end|>`, only quieter, since a rare token gives no clue at review time.
-        real_tokens = len(self.tokenizer)
-        if self.stream_pad_id < real_tokens:
-            token = self.tokenizer.convert_ids_to_tokens(self.stream_pad_id)
-            raise ValueError(
-                f"`stream_pad_id={self.stream_pad_id}` is the existing token {token!r}, not a reserved slot. "
-                "The stream PAD occupies most of the text channel, so that token's learned meaning would be "
-                f"overwritten. Use an id at or above {real_tokens} -- an embedding row that "
-                "exists but carries no token. Source of truth: `configs/tokens.yaml`."
-            )
-        return self.stream_pad_id
-
-    def _banned_stream_pad_ids(self) -> dict[int, str]:
-        """Ids that must never serve as the stream PAD, mapped to why.
-
-        Resolved from the tokenizer rather than hardcoded: `<|im_end|>` is 151645 on Qwen3 and
-        something else everywhere else, so a literal would silently stop guarding the moment the
-        tokenizer changed. `convert_tokens_to_ids` returns None for a token the vocabulary does not
-        have, so a missing marker simply drops out of the set.
-        """
-        banned: dict[int, str] = {}
-        for attribute, reason in (
-            ("pad_token_id", "the tokenizer's batch `pad_token_id`"),
-            ("eos_token_id", "the tokenizer's `eos_token_id`"),
-        ):
-            token_id = getattr(self.tokenizer, attribute, None)
-            if token_id is not None:
-                banned.setdefault(token_id, reason)
-
-        # The two ChatML markers, named explicitly. Kept separate from the eos lookup above because
-        # they coincide on Qwen3 (`eos == <|im_end|>`) and need not elsewhere -- and because naming
-        # the marker makes the error say what the caller actually did.
-        for marker in ("<|im_start|>", "<|im_end|>"):
-            token_id = self.tokenizer.convert_tokens_to_ids(marker)
-            if token_id is not None:
-                banned.setdefault(token_id, f"the ChatML marker `{marker}`")
-        return banned
+        """Id of the stream PAD token (`<pad>`). Overrides Moshi's `pad_token_id` lookup."""
+        return self.tokenizer.convert_tokens_to_ids(self.stream_pad_token)
