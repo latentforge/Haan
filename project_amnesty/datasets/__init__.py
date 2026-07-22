@@ -7,7 +7,7 @@ Offline (run once; writes data/prepared/{source}/{split}/):
 
     base.py             BaseDataset contract + auto-registry + AudioSourceDataset
     mixins.py           MimiEncoder / TextAlign / NpzPairIO
-    *_dataset.py        one module per corpus (kss, zeroth_ko, en_kd, ...)
+    sources/*_dataset.py  one module per corpus (kss, zeroth_ko, en_kd, ...)
     schema.py           the unified Arrow schema + SCHEMA_VERSION
     prepare_dataset.py  all sources -> Arrow, per group
     prepare.py          ensure-materialized gate + `python -m project_amnesty.datasets.prepare`
@@ -42,16 +42,19 @@ from .base import (
     RawEntry,
     build_dataset,
 )
-from .common_voice_ko_dataset import CommonVoiceKoDataset
 from .config import DataConfig, TokenConfig
-from .en_kd_dataset import EnKDDialogueDataset, FilterConfig
-from .en_solo_dataset import EnSoloDataset
 from .item import ITEM_KEYS, KDSample, validate_item
-from .kss_dataset import KSSDataset
 from .mixins import MimiEncoderMixin, NpzPairIOMixin, TextAlignMixin, TextTokCfg
-from .seed_prompt_dataset import SeedPromptDataset
-from .text_anchor_dataset import TextAnchorDataset
-from .zeroth_ko_dataset import ZerothKoDataset
+from .sources import (
+    CommonVoiceKoDataset,
+    EnKDDialogueDataset,
+    EnSoloDataset,
+    FilterConfig,
+    KSSDataset,
+    SeedPromptDataset,
+    TextAnchorDataset,
+    ZerothKoDataset,
+)
 
 __all__ = [
     # offline
