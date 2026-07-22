@@ -437,8 +437,20 @@ class KDCollator:
 
         attention_mask = stream_valid.any(dim=2).any(dim=1) | text_valid
 
+        # Zone A in TEXT coordinates. `zone_ids` marks Zone A at output position 0, but the text
+        # stream (and its leading system prompt) is placed at off_text; in the ASR direction
+        # (off_text > 0) the two part ways. Shift the Zone A mask by the batch's off_text so the text
+        # loss masks the ACTUAL system-prompt positions, not the empty text delay head -- otherwise
+        # the real prompt tokens land in ZONE_C and train as weight-1.0 targets (ARCH §7.2). Audio
+        # zones stay positional: their Zone A is silence, harmless wherever the delay puts it.
+        text_zone_a = zone_ids == ZONE_A
+        if off_text:
+            shifted = torch.zeros_like(text_zone_a)
+            shifted[:, off_text:] = text_zone_a[:, : T - off_text]
+            text_zone_a = shifted
+
         audio_w, text_w = self._loss_weights(
-            stream_valid, text_valid, text_tokens, zone_ids, synthetic_user
+            stream_valid, text_valid, text_tokens, zone_ids, synthetic_user, text_zone_a
         )
 
         return {
@@ -465,8 +477,22 @@ class KDCollator:
                                           dtype=torch.int64, device=dev),
             "sample_uid": sample_uid,
             "delay_offsets": torch.tensor(off, dtype=torch.int64, device=dev),
-            # Tripwire: the model owns the 1-step autoregressive shift.
+            # Tripwire: the data is frame-aligned (input_ids[t] / codes[...,t] are frame t), so the
+            # 1-step autoregressive shift is applied at LOSS time, not baked into the data. For text,
+            # `train.py:build_loss_fn` owns that shift (logits[:-1] vs input_ids[1:], mirroring
+            # ForCausalLMLoss, since forward_with_contract bypasses the model's loss_function). For
+            # audio the depth decoder predicts the current delay-patterned frame from hidden[t], so no
+            # 1-step shift there -- the acoustic delay pattern already carries audio's time alignment.
             "target_aligned": True,
+            # Aliases for the MODEL I/O + BATCH contract (utils/train.py section 3), which names
+            # the same two tensors `audio_codes` and `input_ids`. Both consumers of a batch --
+            # `forward_with_contract` and `build_loss_fn` -- gate on those names, so without these
+            # a real collator batch raises KeyError at the first forward. The alias is added here
+            # rather than renaming the originals because `codes`/`text_tokens` are what the whole
+            # datasets package and its tests speak, and the two names now denote the SAME tensor
+            # object (no copy, no divergence possible).
+            "audio_codes": codes,
+            "input_ids": text_tokens,
         }
 
     # ------------------------------------------------------- zone A/B assembly
@@ -574,7 +600,8 @@ class KDCollator:
             halfwidth=cfg.kd_transition_halfwidth,
         )
 
-    def _loss_weights(self, stream_valid, text_valid, text_tokens, zone_ids, synthetic_user):
+    def _loss_weights(self, stream_valid, text_valid, text_tokens, zone_ids, synthetic_user,
+                      text_zone_a):
         """Multiplicative, fixed order, floored by the validity mask.
 
         Batch padding is not a separate weight term -- it is stream_valid's 0.0
@@ -583,7 +610,7 @@ class KDCollator:
         per-signal gradient-norm monitoring uninterpretable.
         """
         cfg = self.cfg
-        not_zone_a = (zone_ids != ZONE_A).float()          # (B, T)
+        not_zone_a = (zone_ids != ZONE_A).float()          # (B, T), position-0 coords -> audio only
 
         w_audio = stream_valid.float()
         w_audio *= not_zone_a[:, None, None, :]
@@ -591,7 +618,12 @@ class KDCollator:
         if cfg.mask_synthetic_user:
             w_audio[:, 1] *= (~synthetic_user).float()[:, None, None]
 
-        w_text = text_valid.float() * not_zone_a
+        # The text stream sits at off_text, so its Zone A (the system prompt -- REAL tokens, unlike the
+        # audio's silence) is masked with `text_zone_a`, the Zone A mask shifted into text coordinates,
+        # NOT the position-0 `zone_ids` above. In the ASR direction (off_text > 0) they disagree, and
+        # the position-0 mask would leave the prompt as a weight-1.0 target (ARCH §7.2). In the TTS
+        # direction off_text == 0, so `text_zone_a` equals `zone_ids == ZONE_A` and nothing changes.
+        w_text = text_valid.float() * (~text_zone_a).float()
         tok = cfg.tokens
         w_text = torch.where(text_tokens == tok.text_pad_id, w_text * cfg.w_stream_pad_text, w_text)
         w_text = torch.where(text_tokens == tok.text_epad_id, w_text * cfg.w_stream_epad_text, w_text)

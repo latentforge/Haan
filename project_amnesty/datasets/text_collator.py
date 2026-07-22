@@ -88,6 +88,11 @@ class TextAnchorCollator:
 
         return {
             "text_tokens": text_tokens,
+            # Alias for the MODEL I/O + BATCH contract (utils/train.py section 3); the same tensor
+            # under the name the model-facing consumers gate on. Note a text-anchor batch carries
+            # NO audio, so there is deliberately no `audio_codes` alias here -- a consumer that
+            # needs audio must check `batch_kind` rather than assume the key exists.
+            "input_ids": text_tokens,
             "attention_mask": attention_mask,
             # Uniform weight: anchor loss is a directly loggable scalar, not a
             # masked subset of a mixed loss. Its coefficient is tuned separately.
