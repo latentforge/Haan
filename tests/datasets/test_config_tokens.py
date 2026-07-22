@@ -72,7 +72,7 @@ def test_filter_pad_mirrors_tokens(tokens: dict):
 
 def test_teacher_pad_is_not_used_as_the_student_pad(tokens: dict):
     """Guards the specific confusion this whole SeqKD path exists to fix."""
-    from project_amnesty.datasets.mixins import MOSHI_TEXT_PAD_ID
+    from project_amnesty.datasets.offline.mixins import MOSHI_TEXT_PAD_ID
 
     assert tokens["text_pad_id"] != MOSHI_TEXT_PAD_ID
     assert load(FILTER)["text_pad_id"] != MOSHI_TEXT_PAD_ID
@@ -87,7 +87,7 @@ def test_pad_and_epad_are_distinct(tokens: dict):
 def test_filter_config_loads():
     """filter.yaml is consumed by a bare dataclass ctor -- a stray key raises
     TypeError at ingest time, after the dialogues have been read. Fail here."""
-    from project_amnesty.datasets.sources.en_kd_dataset import FilterConfig
+    from project_amnesty.datasets.offline.sources.en_kd_dataset import FilterConfig
 
     filt = FilterConfig.from_yaml(str(FILTER))
     assert 0.0 < filt.silence_ratio_min < filt.silence_ratio_max < 1.0

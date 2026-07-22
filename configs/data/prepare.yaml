@@ -1,5 +1,19 @@
 out_root: data/prepared
 holdout_ratio: 0.02
 datasets:
-  zeroth_ko: {out_dir: data/tokenized, text_cfg: null}
+  # ko_tts roster (2026-07-21): kss + common_voice_ko. zeroth_ko was dropped by
+  # decision on the same date — builder still exists but is not prepared.
+  #
+  # root + text_config let `prepare` auto-run build() (download + Mimi tokenize)
+  # when tokenized artifacts are missing, so no separate build step is needed.
+  # build() needs a GPU for Mimi encoding. kss ignores a missing root (it falls
+  # back to the HF hub); common_voice_ko downloads its ko subset into root.
+  kss:
+    out_dir: data/tokenized
+    root: data/raw/kss
+    text_config: configs/data/text_tok.yaml
+  common_voice_ko:
+    out_dir: data/tokenized
+    root: data/raw/common_voice_ko
+    text_config: configs/data/text_tok.yaml
   text_anchor: {jsonl: data/raw/text_anchor.jsonl, max_len: 2048}

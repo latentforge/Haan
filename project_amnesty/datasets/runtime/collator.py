@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 
 import torch
 
-from project_amnesty.datasets.schema import FRAME_RATE_HZ, NUM_CODEBOOKS
+from project_amnesty.datasets.shared.schema import FRAME_RATE_HZ, NUM_CODEBOOKS
 
 from .config import TokenConfig
 from .item import LANG_IDS, SAMPLE_TYPE_IDS, KDSample
@@ -42,7 +42,7 @@ ZONE_A, ZONE_B, ZONE_C, ZONE_PAD = 0, 1, 2, 3
 _TEXT_ANCHOR_MSG = (
     "KDCollator received a text_anchor row ({uid!r}). text_anchor has T=0 and no "
     "codebook axis to hang a delay on -- it must go through "
-    "project_amnesty.datasets.text_collator.TextAnchorCollator on its own micro-batch "
+    "project_amnesty.datasets.runtime.text_collator.TextAnchorCollator on its own micro-batch "
     "(plan section 5.4). Mixing happens at the grad_accum step level, not inside a batch."
 )
 

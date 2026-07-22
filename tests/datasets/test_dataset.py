@@ -23,10 +23,10 @@ from conftest import (
     make_solo_sample,
     make_text_anchor_sample,
 )
-from project_amnesty.datasets.schema import CODEBOOK_SIZE, NUM_CODEBOOKS, row_to_arrays
-from project_amnesty.datasets.crop import Window, choose_window
-from project_amnesty.datasets.dataset import MoshiKDDataset, build_source_datasets
-from project_amnesty.datasets.item import ITEM_KEYS
+from project_amnesty.datasets.shared.schema import CODEBOOK_SIZE, NUM_CODEBOOKS, row_to_arrays
+from project_amnesty.datasets.runtime.crop import Window, choose_window
+from project_amnesty.datasets.runtime.dataset import MoshiKDDataset, build_source_datasets
+from project_amnesty.datasets.runtime.item import ITEM_KEYS
 
 K = NUM_CODEBOOKS
 
@@ -655,7 +655,7 @@ def test_25h_speaker_index_reads_only_the_speaker_column(prepared, data_cfg, mon
     Building a speaker map through the list-column path would materialize the
     whole corpus to answer a string question.
     """
-    import project_amnesty.datasets.dataset as dsmod
+    import project_amnesty.datasets.runtime.dataset as dsmod
 
     ds = _voice_ds(prepared, data_cfg, [(f"s{i}", "spkA", 40) for i in range(3)])
     ds._spk = None  # nothing cached yet
@@ -685,7 +685,7 @@ def test_25j_text_anchor_has_no_reference(anchor_ds):
 
 
 def test_25k_validate_item_passes_on_every_source(prepared, data_cfg):
-    from project_amnesty.datasets.item import validate_item
+    from project_amnesty.datasets.runtime.item import validate_item
 
     prepared("en_kd", "train", [make_en_kd_sample("kd0", T=80)])
     prepared("text_anchor", "train", [make_text_anchor_sample("tx0", L=20)])

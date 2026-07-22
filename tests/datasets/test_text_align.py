@@ -22,7 +22,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from project_amnesty.datasets.mixins import TextTokCfg, align_timestamps, align_uniform
+from project_amnesty.datasets.offline.mixins import TextTokCfg, align_timestamps, align_uniform
 
 PAD, EPAD = 900, 901
 CFG = TextTokCfg(tokenizer_name="dummy", text_pad_id=PAD, text_epad_id=EPAD)
@@ -217,7 +217,7 @@ def src_stream(words_at: list[tuple[str, int]], num_frames: int) -> np.ndarray:
 
 
 def test_retokenize_preserves_length_and_word_onsets():
-    from project_amnesty.datasets.mixins import retokenize_frame_aligned
+    from project_amnesty.datasets.offline.mixins import retokenize_frame_aligned
 
     placed = [("abc", 5), ("de", 20)]
     s = src_stream(placed, 40)
@@ -232,7 +232,7 @@ def test_retokenize_preserves_length_and_word_onsets():
 def test_retokenize_maps_teacher_pad_onto_student_pad():
     """The bug this whole path exists for: without it pad_ratio is 0.0 and the
     quality filter rejects every dialogue as `never_silent`."""
-    from project_amnesty.datasets.mixins import retokenize_frame_aligned
+    from project_amnesty.datasets.offline.mixins import retokenize_frame_aligned
 
     s = src_stream([("hi", 4), ("there", 12)], 40)
     out = retokenize_frame_aligned(s, _FakeSrcTok(), SRC_PAD, _FakeTok(), CFG)
@@ -243,7 +243,7 @@ def test_retokenize_maps_teacher_pad_onto_student_pad():
 
 def test_retokenize_keeps_a_silent_speaker_silent():
     """A collapsed speaker must stay all-PAD, or `always_silent` stops detecting it."""
-    from project_amnesty.datasets.mixins import retokenize_frame_aligned
+    from project_amnesty.datasets.offline.mixins import retokenize_frame_aligned
 
     out = retokenize_frame_aligned(
         np.full(30, SRC_PAD, dtype=np.int32), _FakeSrcTok(), SRC_PAD, _FakeTok(), CFG
@@ -254,7 +254,7 @@ def test_retokenize_keeps_a_silent_speaker_silent():
 def test_word_grouping_splits_on_word_prefix_not_on_frame_gaps():
     """Multi-token words must survive as one word: splitting them would move the
     later fragments' onsets and fabricate EPAD triggers mid-word."""
-    from project_amnesty.datasets.mixins import words_from_frame_stream
+    from project_amnesty.datasets.offline.mixins import words_from_frame_stream
 
     s = src_stream([("abc", 5), ("de", 20)], 40)
     assert words_from_frame_stream(s, _FakeSrcTok(), SRC_PAD) == [("abc", 5), ("de", 20)]
@@ -263,7 +263,7 @@ def test_word_grouping_splits_on_word_prefix_not_on_frame_gaps():
 def test_place_words_at_frames_has_no_float_roundtrip_drift():
     """align_timestamps goes through seconds; frame 7 is 6.999... on the way back.
     The frame-indexed entry point must not inherit that."""
-    from project_amnesty.datasets.mixins import place_words_at_frames
+    from project_amnesty.datasets.offline.mixins import place_words_at_frames
 
     for f in range(1, 30):
         s = place_words_at_frames([("a", f)], 40, _FakeTok(), CFG)

@@ -20,8 +20,8 @@ import pytest
 
 from conftest import make_solo_sample  # tests/ is put on sys.path by conftest
 from project_amnesty.datasets import REGISTRY, BaseDataset
-from project_amnesty.datasets.prepare_dataset import builders_for_group
-from project_amnesty.datasets.schema import SCHEMA_VERSION
+from project_amnesty.datasets.offline.prepare_dataset import builders_for_group
+from project_amnesty.datasets.shared.schema import SCHEMA_VERSION
 from project_amnesty.datasets import prepare as P
 
 FAKE_GROUP = "fake_group"
@@ -198,7 +198,7 @@ def test_44_schema_version_mismatch_rebuilds(root: Path, tmp_path: Path):
 
 
 def test_45_heavy_group_refused_in_multirank_job():
-    from project_amnesty.datasets.loader import HEAVY_GROUPS, _assert_can_build
+    from project_amnesty.datasets.runtime.loader import HEAVY_GROUPS, _assert_can_build
 
     assert {"en_kd", "en_solo", "ko_tts"} <= set(HEAVY_GROUPS)
 
@@ -211,7 +211,7 @@ def test_45_heavy_group_refused_in_multirank_job():
 
 
 def test_45b_rank_guard_allows_the_cases_it_should():
-    from project_amnesty.datasets.loader import _assert_can_build
+    from project_amnesty.datasets.runtime.loader import _assert_can_build
 
     _assert_can_build("never", "en_kd", world_size=4)        # never build in-job
     _assert_can_build("if_missing", "en_kd", world_size=1)   # single process

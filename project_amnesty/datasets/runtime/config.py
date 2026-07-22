@@ -19,7 +19,7 @@ from pathlib import Path
 import numpy as np
 import yaml
 
-from project_amnesty.datasets.schema import CODEBOOK_SIZE, NUM_CODEBOOKS
+from project_amnesty.datasets.shared.schema import CODEBOOK_SIZE, NUM_CODEBOOKS
 
 TOKENS_YAML = "configs/tokens.yaml"
 SILENCE_JSON = "configs/data/mimi_silence.json"

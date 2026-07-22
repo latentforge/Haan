@@ -1,8 +1,8 @@
 """Generated family: ingest dual-Moshi self-talk dialogues → quality filter → en_kd samples.
 
 **Generation is out of scope for this package.** en_kd dialogues are produced by
-running the teacher (a Moshi self-play harness, currently the Colab notebook
-`kmoshi_ab_selfplay_v2.ipynb`), which is teacher *inference*, not corpus
+running the teacher (a Moshi self-play harness, the Colab notebook
+`notebooks/selfplay.ipynb`), which is teacher *inference*, not corpus
 preparation. Every other builder here parses an existing corpus; this one used to
 also create it, and the mismatch cost real time — the in-repo generator was a
 `NotImplementedError` stub whose docstring blamed an unfinished "team fork
@@ -44,7 +44,7 @@ from typing import Iterator
 import numpy as np
 import yaml
 
-from ..schema import Sample
+from project_amnesty.datasets.shared.schema import Sample
 from ..base import BaseDataset
 from ..mixins import (
     MOSHI_TEXT_PAD_ID,
@@ -75,7 +75,8 @@ class FilterConfig:
 
     @classmethod
     def from_yaml(cls, path: str) -> "FilterConfig":
-        with open(path) as f:
+        # utf-8: configs carry Korean comments (cp949 default breaks on Windows).
+        with open(path, encoding="utf-8") as f:
             return cls(**yaml.safe_load(f))
 
 
@@ -181,7 +182,7 @@ class EnKDDialogueDataset(BaseDataset):
         """
         raise NotImplementedError(
             "en_kd is not generated in-repo. Run the Moshi self-play harness "
-            "(kmoshi_ab_selfplay_v2.ipynb) to produce dialogue_*.npz + "
+            "(notebooks/selfplay.ipynb) to produce dialogue_*.npz + "
             ".meta.json, then ingest them:\n"
             "    python -m project_amnesty.datasets en_kd --stage ingest "
             "--root <dialogues_dir> --text-config configs/data/text_tok.yaml"

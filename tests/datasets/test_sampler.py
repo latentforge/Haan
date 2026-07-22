@@ -15,8 +15,8 @@ from collections import Counter
 import numpy as np
 import pytest
 
-from project_amnesty.datasets.sampler import GroupIndex, MixingBatchSampler, assert_group_sync
-from project_amnesty.datasets.schedule import MixSchedule
+from project_amnesty.datasets.runtime.sampler import GroupIndex, MixingBatchSampler, assert_group_sync
+from project_amnesty.datasets.runtime.schedule import MixSchedule
 
 GROUPS = ("en_kd", "en_solo", "ko_tts", "text_anchor")
 

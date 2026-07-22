@@ -303,7 +303,7 @@ def build_dataloader(
                     f"prepared data missing: {root / d / split}\n"
                     f"    run: python -m project_amnesty.datasets.prepare --group {d}"
                 )
-            from .prepare import ensure_prepared  # local import: optional dependency
+            from project_amnesty.datasets.prepare import ensure_prepared  # local import: optional dependency
 
             ensure_prepared(d, root=root, force=(loader_cfg.build == "force"))
 

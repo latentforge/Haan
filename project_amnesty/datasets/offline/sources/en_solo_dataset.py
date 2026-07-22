@@ -19,7 +19,7 @@ from typing import Iterator
 
 import numpy as np
 
-from ..schema import FRAME_RATE_HZ
+from project_amnesty.datasets.shared.schema import FRAME_RATE_HZ
 from ..base import BaseDataset
 from ..mixins import NpzPairIOMixin, TextTokCfg
 

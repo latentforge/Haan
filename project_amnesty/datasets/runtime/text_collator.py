@@ -30,7 +30,7 @@ from .item import LANG_IDS, SAMPLE_TYPE_IDS, KDSample
 _AUDIO_ROW_MSG = (
     "TextAnchorCollator received a non-text_anchor row ({uid!r}, sample_type="
     "{stype!r}). Frame-aligned audio rows belong to "
-    "project_amnesty.datasets.collator.KDCollator."
+    "project_amnesty.datasets.runtime.collator.KDCollator."
 )
 
 

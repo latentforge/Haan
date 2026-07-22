@@ -28,7 +28,7 @@ import yaml
 from datasets import Dataset, concatenate_datasets, load_from_disk
 
 from .base import REGISTRY, BaseDataset, build_dataset
-from .schema import arrow_features
+from project_amnesty.datasets.shared.schema import arrow_features
 
 DEFAULT_HOLDOUT_RATIO = 0.02
 SPLITS = ("train", "probe")
@@ -170,7 +170,8 @@ def build_group(group: str, builders: list[BaseDataset], out_root: Path,
 
 
 def main(cfg_path: str) -> None:
-    cfg = yaml.safe_load(open(cfg_path))
+    # utf-8: prepare.yaml carries Korean comments (cp949 default breaks on Windows).
+    cfg = yaml.safe_load(open(cfg_path, encoding="utf-8"))
     out = Path(cfg["out_root"])
     hr = cfg.get("holdout_ratio", DEFAULT_HOLDOUT_RATIO)
 

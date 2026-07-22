@@ -20,7 +20,7 @@ import json
 import numpy as np
 import pytest
 
-from project_amnesty.datasets.schema import CODEBOOK_SIZE, FRAME_RATE_HZ, NUM_CODEBOOKS, SAMPLE_RATE
+from project_amnesty.datasets.shared.schema import CODEBOOK_SIZE, FRAME_RATE_HZ, NUM_CODEBOOKS, SAMPLE_RATE
 from project_amnesty.tools.derive_silence_codes import (
     DEFAULT_MIMI_CKPT,
     ProbeParams,

@@ -15,7 +15,7 @@ from typing import Iterator
 
 import numpy as np
 
-from ..schema import Sample
+from project_amnesty.datasets.shared.schema import Sample
 from ..base import BaseDataset
 from ..mixins import TextTokCfg
 

@@ -39,7 +39,7 @@ from typing import Iterator
 
 import numpy as np
 
-from .schema import FRAME_RATE_HZ, SAMPLE_RATE, Sample
+from project_amnesty.datasets.shared.schema import FRAME_RATE_HZ, SAMPLE_RATE, Sample
 from .mixins import MimiEncoderMixin, NpzPairIOMixin, TextAlignMixin, TextTokCfg
 
 REGISTRY: dict[str, type["BaseDataset"]] = {}
@@ -77,6 +77,16 @@ class BaseDataset(ABC):
     @abstractmethod
     def iter_samples(self) -> Iterator[Sample]:
         """Artifacts → unified-schema Sample. Input for prepare_dataset's Arrow conversion."""
+
+    def ensure_built(self) -> None:
+        """Guarantee this builder's tokenized artifacts exist before iter_samples().
+
+        The ensure_prepared gate calls this on every builder so that one command
+        materializes raw data → tokens → Arrow without an out-of-band build step.
+        Default is a no-op: text_anchor tokenizes on the fly, and en_kd artifacts
+        come from teacher inference (guarded separately, never auto-generated).
+        Only families that own a raw→token build() override it.
+        """
 
     # ---------------- CLI adapter ----------------
 
@@ -142,14 +152,31 @@ class AudioSourceDataset(MimiEncoderMixin, TextAlignMixin, NpzPairIOMixin, BaseD
         out_dir: str | Path = "data/tokenized",
         root: str | Path | None = None,        # needed only for build (iter_samples uses out_dir only)
         text_cfg: TextTokCfg | None = None,    # needed only for build
+        text_config: str | Path | None = None,  # yaml path alt to text_cfg (config-driven prepare)
         device: str = "cuda",
         batch_size: int = 16,
     ):
         super().__init__(out_dir)
         self.root = Path(root) if root is not None else None
+        # The CLI passes a built text_cfg; the config-driven ensure_prepared path
+        # passes a yaml path instead (prepare.yaml can't hold a TextTokCfg object).
+        if text_cfg is None and text_config is not None:
+            text_cfg = TextTokCfg.from_yaml(str(text_config))
         self.text_cfg = text_cfg
         self.device = device
         self.batch_size = batch_size
+
+    def ensure_built(self) -> None:
+        """Materialize tokenized artifacts if the build has not completed.
+
+        Gated on build_stats.json, which build() writes as its final action, so a
+        *complete* build is skipped cheaply while a *partial* one (interrupted
+        before that write, its per-uid pairs half-present) re-enters build() and
+        resumes via the is_cached skip. Gating on the pair files instead would let
+        a half-built corpus look done and get Arrow-stamped as complete.
+        """
+        if not (self.out_dir / "build_stats.json").exists():
+            self.build()
 
     @classmethod
     def from_cli(cls, args) -> "AudioSourceDataset":
@@ -166,6 +193,11 @@ class AudioSourceDataset(MimiEncoderMixin, TextAlignMixin, NpzPairIOMixin, BaseD
     def iter_entries(self) -> Iterator[RawEntry]:
         """Raw data → RawEntry. Per-source differences should, in principle, live only here."""
         raise NotImplementedError
+
+    def ensure_downloaded(self) -> None:
+        """Materialize raw data under root if the source supports it. Called by
+        build() before iteration; default is a no-op (raw data assumed present,
+        or fetched lazily inside iter_entries as for the HF-hub sources)."""
 
     def load_audio(self, entry: RawEntry) -> np.ndarray:
         """Return (1, S) float32 @ 24kHz. Override only for sources that need resampling."""
@@ -185,6 +217,7 @@ class AudioSourceDataset(MimiEncoderMixin, TextAlignMixin, NpzPairIOMixin, BaseD
         """Run the full pipeline: cache skip → batched Mimi encoding → text alignment → save."""
         assert self.root is not None and self.text_cfg is not None, \
             "build() requires root and text_cfg"
+        self.ensure_downloaded()
         self.out_dir.mkdir(parents=True, exist_ok=True)
         stats = {"total": 0, "cached": 0, "encoded": 0, "failed": 0}
 

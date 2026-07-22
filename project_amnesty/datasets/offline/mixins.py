@@ -28,7 +28,7 @@ from typing import Iterator
 import numpy as np
 import yaml
 
-from .schema import FRAME_RATE_HZ, NUM_CODEBOOKS, SAMPLE_RATE, Sample
+from project_amnesty.datasets.shared.schema import FRAME_RATE_HZ, NUM_CODEBOOKS, SAMPLE_RATE, Sample
 
 # The corpus is baked with this checkpoint. It is the HF conversion of Moshiko:
 # the `moshi` package is not installed here, and `kmhf/hf-moshiko` is what the
@@ -64,7 +64,8 @@ class TextTokCfg:
 
     @classmethod
     def from_yaml(cls, path: str) -> "TextTokCfg":
-        with open(path) as f:
+        # utf-8: configs carry Korean comments (cp949 default breaks on Windows).
+        with open(path, encoding="utf-8") as f:
             return cls(**yaml.safe_load(f))
 
 

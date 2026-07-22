@@ -49,7 +49,7 @@ import argparse
 
 # References used here (imported lazily INSIDE each eval body, off the entry-point load path):
 #   from project_amnesty.models.modeling_haan import HaanForConditionalGeneration  (forward TODO)
-#   from project_amnesty.datasets.loader import build_dataloader   (real; split="probe" holdout)
+#   from project_amnesty.datasets.runtime.loader import build_dataloader   (real; split="probe" holdout)
 # datasets/ is fully implemented, so the probe loader runs for real; the model's forward is the
 # only piece still TODO. What lives in eval_content / eval_mechanism / probe_representations is
 # genuine *implementation* (generation loop, external ASR, timing/overlap, probing) that belongs
@@ -952,8 +952,8 @@ def eval_mechanism(ckpt: str, split: str = "probe") -> dict:
     # does NOT need mix_cfg (only training does); it returns a LoaderBundle. Pass a
     # KDCollatorConfig seeded with the config's token ids so the collator has them (the default
     # DelayConfig is fine -- delay does not affect the probe's mechanism metric positions).
-    from project_amnesty.datasets.collator import KDCollatorConfig  # noqa: PLC0415 (lazy)
-    from project_amnesty.datasets.loader import build_dataloader, load_configs  # noqa: PLC0415 (lazy)
+    from project_amnesty.datasets.runtime.collator import KDCollatorConfig  # noqa: PLC0415 (lazy)
+    from project_amnesty.datasets.runtime.loader import build_dataloader, load_configs  # noqa: PLC0415 (lazy)
 
     data_cfg, loader_cfg, _mix = load_configs()
     bundle = build_dataloader(

@@ -216,8 +216,8 @@ def build_dataloader(dargs: DataArgs, targs: TrainArgs, split: str = "train") ->
     and the per-token loss weights the loss consumes (ARCH 7.6/7.4).
     """
     # Heavy datasets imports stay LAZY here so the module py_compiles / imports with torch alone.
-    from project_amnesty.datasets.loader import build_dataloader as _build, load_configs
-    from project_amnesty.datasets.collator import KDCollatorConfig, DelayConfig
+    from project_amnesty.datasets.runtime.loader import build_dataloader as _build, load_configs
+    from project_amnesty.datasets.runtime.collator import KDCollatorConfig, DelayConfig
 
     # All static config (root/dataset/mix/sampler/dataloader) is read from configs/data/loader.yaml.
     data_cfg, loader_cfg, mix_cfg = load_configs()

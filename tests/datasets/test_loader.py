@@ -26,10 +26,10 @@ import pytest
 import torch
 
 from conftest import make_en_kd_sample, make_solo_sample, make_text_anchor_sample
-from project_amnesty.datasets.schema import NUM_CODEBOOKS
-from project_amnesty.datasets.collator import DelayConfig, KDCollator, KDCollatorConfig
-from project_amnesty.datasets.item import SAMPLE_TYPE_IDS
-from project_amnesty.datasets.loader import (
+from project_amnesty.datasets.shared.schema import NUM_CODEBOOKS
+from project_amnesty.datasets.runtime.collator import DelayConfig, KDCollator, KDCollatorConfig
+from project_amnesty.datasets.runtime.item import SAMPLE_TYPE_IDS
+from project_amnesty.datasets.runtime.loader import (
     GROUP_ALIASES,
     HEAVY_GROUPS,
     ConcatSources,
@@ -40,7 +40,7 @@ from project_amnesty.datasets.loader import (
     build_dataloader,
     group_dir,
 )
-from project_amnesty.datasets.text_collator import TextAnchorCollator, TextAnchorCollatorConfig
+from project_amnesty.datasets.runtime.text_collator import TextAnchorCollator, TextAnchorCollatorConfig
 
 K = NUM_CODEBOOKS
 GROUPS = ("en_kd", "ko_tts", "text_anchor")
@@ -999,7 +999,7 @@ def test_bidirectional_reuse_over_the_real_zeroth_corpus(tokens):
     where lengths, speakers and text distributions are whatever the pipeline
     really produced.
     """
-    from project_amnesty.datasets.config import DataConfig
+    from project_amnesty.datasets.runtime.config import DataConfig
 
     cfg = DataConfig(
         root=str(REAL_ROOT), tokens=tokens, max_frames=750,

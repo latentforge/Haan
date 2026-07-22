@@ -30,10 +30,10 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset, get_worker_info
 
-from project_amnesty.datasets.schema import NUM_CODEBOOKS
-from project_amnesty.datasets.config import DataConfig
-from project_amnesty.datasets.crop import Window, apply_window_kt, apply_window_ktk, apply_window_t, choose_window
-from project_amnesty.datasets.item import KDSample, empty_ref, empty_like_streams, validate_item
+from project_amnesty.datasets.shared.schema import NUM_CODEBOOKS
+from project_amnesty.datasets.runtime.config import DataConfig
+from project_amnesty.datasets.runtime.crop import Window, apply_window_kt, apply_window_ktk, apply_window_t, choose_window
+from project_amnesty.datasets.runtime.item import KDSample, empty_ref, empty_like_streams, validate_item
 
 _SOURCES = ("en_kd", "en_solo", "ko_tts", "text_anchor")
 
@@ -101,7 +101,7 @@ class _ListColumn:
             warnings.warn(
                 f"zero-copy read unavailable for column {name!r} ({type(exc).__name__}: {exc}); "
                 f"falling back to a copying read. Check for nulls or a changed child type "
-                f"in project_amnesty.datasets.schema.arrow_features().",
+                f"in project_amnesty.datasets.shared.schema.arrow_features().",
                 RuntimeWarning,
                 stacklevel=2,
             )

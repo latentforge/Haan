@@ -8,7 +8,7 @@ at all.
 import pytest
 import torch
 
-from project_amnesty.datasets.kd_align import (
+from project_amnesty.datasets.runtime.kd_align import (
     assert_aligned,
     derive_kd_valid,
     shift_scan,

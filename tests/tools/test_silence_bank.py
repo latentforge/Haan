@@ -30,9 +30,9 @@ import numpy as np
 import pytest
 
 from conftest import DUMMY_SILENCE, DUMMY_SILENCE_BANK, make_solo_sample
-from project_amnesty.datasets.schema import CODEBOOK_SIZE, NUM_CODEBOOKS
-from project_amnesty.datasets.config import DataConfig, TokenConfig
-from project_amnesty.datasets.dataset import MoshiKDDataset
+from project_amnesty.datasets.shared.schema import CODEBOOK_SIZE, NUM_CODEBOOKS
+from project_amnesty.datasets.runtime.config import DataConfig, TokenConfig
+from project_amnesty.datasets.runtime.dataset import MoshiKDDataset
 
 K = NUM_CODEBOOKS
 P = len(DUMMY_SILENCE_BANK[0])

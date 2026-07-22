@@ -35,17 +35,17 @@ Caution: this must stay the `project_amnesty.datasets` subpackage. A top-level
 `datasets/` would shadow the HF `datasets` import that base.py and dataset.py rely on.
 """
 
-from .base import (
+from .offline.base import (
     REGISTRY,
     AudioSourceDataset,
     BaseDataset,
     RawEntry,
     build_dataset,
 )
-from .config import DataConfig, TokenConfig
-from .item import ITEM_KEYS, KDSample, validate_item
-from .mixins import MimiEncoderMixin, NpzPairIOMixin, TextAlignMixin, TextTokCfg
-from .sources import (
+from .runtime.config import DataConfig, TokenConfig
+from .runtime.item import ITEM_KEYS, KDSample, validate_item
+from .offline.mixins import MimiEncoderMixin, NpzPairIOMixin, TextAlignMixin, TextTokCfg
+from .offline.sources import (
     CommonVoiceKoDataset,
     EnKDDialogueDataset,
     EnSoloDataset,

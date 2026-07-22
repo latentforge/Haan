@@ -10,7 +10,7 @@ import pytest
 import torch
 
 from tests.datasets.test_collator import kd_row
-from project_amnesty.datasets.collator import ZONE_A, KDCollator, KDCollatorConfig, DelayConfig
+from project_amnesty.datasets.runtime.collator import ZONE_A, KDCollator, KDCollatorConfig, DelayConfig
 from project_amnesty.losses import semantic_kd_loss_from_batch
 
 V = 2048

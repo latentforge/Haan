@@ -39,6 +39,6 @@ silence_bank_path: configs/data/mimi_silence.json
 # -- same Mimi weights, and the only form actually loadable here.
 mimi_ckpt_id: kmhf/hf-moshiko
 
-# Mirrors of project_amnesty.datasets.schema; asserted equal at load so drift fails fast.
+# Mirrors of project_amnesty.datasets.shared.schema; asserted equal at load so drift fails fast.
 codebook_size: 2048
 num_codebooks: 8

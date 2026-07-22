@@ -1,12 +1,15 @@
 """CLI: python -m project_amnesty.datasets <name> [options]
 
 Examples:
-  # KO TTS sources (audio family)
+  # KO TTS sources (audio family). Raw data is fetched automatically when absent:
+  # kss falls back to the HF hub, common_voice_ko downloads the ko subset into --root.
   python -m project_amnesty.datasets kss --root data/raw/kss --out-dir data/tokenized
-  python -m project_amnesty.datasets zeroth_ko --root . --out-dir data/tokenized --limit 100
+  python -m project_amnesty.datasets common_voice_ko --root data/raw/common_voice_ko \
+      --out-dir data/tokenized
 
   # en_kd: ingest teacher self-play dialogues, then filter. Generation itself is
-  # NOT done here -- run the Moshi self-play harness to get dialogue_*.npz first.
+  # NOT done here -- run the Moshi self-play harness (notebooks/selfplay.ipynb)
+  # to get dialogue_*.npz first.
   python -m project_amnesty.datasets en_kd --stage ingest --root <dialogues_dir> \
       --text-config configs/data/text_tok.yaml --filter-config configs/data/filter.yaml
   python -m project_amnesty.datasets en_kd --stage filter \

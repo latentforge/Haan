@@ -26,7 +26,7 @@ directory that is guaranteed complete. Three things make that guarantee real.
    definition, waiting on someone who is about to finish.
 
 Group selection is N:1 and derived from ``REGISTRY``, never hardcoded -- see
-``project_amnesty.datasets.prepare_dataset.builders_for_group``.
+``project_amnesty.datasets.offline.prepare_dataset.builders_for_group``.
 """
 
 from __future__ import annotations
@@ -50,12 +50,12 @@ from pathlib import Path
 import yaml
 
 from project_amnesty.datasets import REGISTRY, BaseDataset
-from project_amnesty.datasets.prepare_dataset import (
+from project_amnesty.datasets.offline.prepare_dataset import (
     DEFAULT_HOLDOUT_RATIO,
     build_group,
     builders_for_group,
 )
-from project_amnesty.datasets.schema import SCHEMA_VERSION
+from project_amnesty.datasets.shared.schema import SCHEMA_VERSION
 
 SENTINEL_NAME = "_SUCCESS.json"
 LOCK_DIR_NAME = ".locks"
@@ -188,7 +188,7 @@ which trains fine and teaches nothing, so this stops here instead.
 
 en_kd is not generated in this repo -- generation is teacher inference, not
 corpus preparation. Produce the dialogues with the Moshi self-play harness
-(kmoshi_ab_selfplay_v2.ipynb), then ingest them:
+(notebooks/selfplay.ipynb), then ingest them:
 
     python -m project_amnesty.datasets en_kd --stage ingest --root <dialogues_dir> \\
         --text-config configs/data/text_tok.yaml \\
@@ -252,6 +252,25 @@ def ensure_prepared(group: str, *, root: str | Path, cfg: dict | None = None,
         builders = builders_for_group(group, cfg)
         _check_en_kd_artifacts(builders)
 
+        # Materialize each builder's tokenized artifacts before Arrow assembly, so
+        # one command runs raw download -> Mimi tokens -> Arrow uninterrupted. This
+        # is the raw->token half of the "MNIST(download=True)" guarantee; build_group
+        # below is the token->Arrow half. No-op for builders that own no build
+        # (en_kd, text_anchor); the audio sources (ko_tts) download+tokenize here.
+        # Inside the lock and under an invalid sentinel, so it is concurrency-safe
+        # and only runs when a (re)build is actually due.
+        #
+        # Restricted to config-listed builders on purpose: builders_for_group is
+        # REGISTRY-derived, so a group can include a builder that is registered but
+        # deliberately not prepared (zeroth_ko, dropped 2026-07-21, still
+        # source="ko_tts"). Such a builder has no root/text_cfg and must not be
+        # revived by an auto-build; absent from the config it stays an empty
+        # out_dir that iter_samples contributes nothing from, exactly as before.
+        configured = set((cfg.get("datasets") or {}))
+        for b in builders:
+            if b.name in configured:
+                b.ensure_built()
+
         # Invalidate before writing: a crash mid-rebuild must not leave a
         # sentinel that describes the previous build's row counts.
         sentinel_path(root, group).unlink(missing_ok=True)
@@ -301,7 +320,9 @@ def load_cfg(path: str | Path | None) -> dict:
     p = Path(path)
     if not p.exists():
         raise FileNotFoundError(f"config not found: {p}")
-    return yaml.safe_load(p.read_text()) or {}
+    # explicit utf-8: configs carry Korean comments, and read_text() would
+    # otherwise decode with the platform default (cp949 on a Windows dev box).
+    return yaml.safe_load(p.read_text(encoding="utf-8")) or {}
 
 
 def build_parser() -> argparse.ArgumentParser:

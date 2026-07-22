@@ -24,8 +24,8 @@ TESTS_ROOT = Path(__file__).resolve().parent
 if str(TESTS_ROOT) not in sys.path:
     sys.path.insert(0, str(TESTS_ROOT))
 
-from project_amnesty.datasets.schema import CODEBOOK_SIZE, NUM_CODEBOOKS, Sample, arrow_features  # noqa: E402
-from project_amnesty.datasets.config import DataConfig, TokenConfig  # noqa: E402
+from project_amnesty.datasets.shared.schema import CODEBOOK_SIZE, NUM_CODEBOOKS, Sample, arrow_features  # noqa: E402
+from project_amnesty.datasets.runtime.config import DataConfig, TokenConfig  # noqa: E402
 
 # Dummy ids standing in for the still-unassigned reserved Qwen3 slots. Tests must
 # never depend on the real values -- that is the whole point of config injection.

@@ -28,12 +28,12 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from project_amnesty.datasets.mixins import (  # noqa: E402
+from project_amnesty.datasets.offline.mixins import (  # noqa: E402
     DEFAULT_MIMI_CKPT,
     MimiEncoderMixin,
     NpzPairIOMixin,
 )
-from project_amnesty.datasets.schema import (  # noqa: E402
+from project_amnesty.datasets.shared.schema import (  # noqa: E402
     FRAME_RATE_HZ,
     NUM_CODEBOOKS,
     SAMPLE_RATE,
@@ -236,7 +236,7 @@ def test_write_chunks_without_changing_the_result(tmp_path, monkeypatch):
     """Many small chunks must produce exactly what one big write would."""
     from datasets import load_from_disk
 
-    from project_amnesty.datasets import prepare_dataset as pd_mod
+    from project_amnesty.datasets.offline import prepare_dataset as pd_mod
 
     n = 25
     rows = [_sample(f"spk{i}", uid=f"uid{i:03d}").to_row() for i in range(n)]
@@ -269,7 +269,7 @@ def test_write_chunks_without_changing_the_result(tmp_path, monkeypatch):
 def test_write_removes_its_chunk_scratch(tmp_path, monkeypatch):
     """The chunks live under the destination; leaving them doubles corpus size
     and makes `_chunks` look like a prepared group to anything globbing the root."""
-    from project_amnesty.datasets import prepare_dataset as pd_mod
+    from project_amnesty.datasets.offline import prepare_dataset as pd_mod
 
     monkeypatch.setattr(pd_mod, "ROWS_PER_CHUNK", 2)
     rows = [_sample("s", uid=f"u{i}").to_row() for i in range(7)]
@@ -282,7 +282,7 @@ def test_write_removes_its_chunk_scratch(tmp_path, monkeypatch):
 def test_write_still_splits_train_and_probe_in_one_pass(tmp_path, monkeypatch):
     """`rows` is a generator over iter_samples(); a second pass would re-read
     every npz, so the split has to happen while streaming."""
-    from project_amnesty.datasets import prepare_dataset as pd_mod
+    from project_amnesty.datasets.offline import prepare_dataset as pd_mod
 
     monkeypatch.setattr(pd_mod, "ROWS_PER_CHUNK", 2)
     rows = [_sample("s", uid=f"u{i:03d}").to_row() for i in range(40)]
@@ -307,7 +307,7 @@ def test_rows_per_chunk_stays_small_enough_to_bound_memory():
     unbounded behaviour with no test failing, because the correctness tests set
     it explicitly. en_kd sizes it: ~3 MB of teacher top-k per dialogue at
     K=8/T=1500/topk=32, so 512 rows is ~1.5 GB of buffer before a flush."""
-    from project_amnesty.datasets.prepare_dataset import ROWS_PER_CHUNK
+    from project_amnesty.datasets.offline.prepare_dataset import ROWS_PER_CHUNK
 
     assert 1 <= ROWS_PER_CHUNK <= 4096, (
         f"ROWS_PER_CHUNK={ROWS_PER_CHUNK} no longer bounds the write buffer"

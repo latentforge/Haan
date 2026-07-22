@@ -20,9 +20,9 @@ from typing import TypedDict
 
 import torch
 
-from project_amnesty.datasets.schema import NUM_CODEBOOKS
+from project_amnesty.datasets.shared.schema import NUM_CODEBOOKS
 
-# Sample types, mirroring project_amnesty.datasets.schema.SAMPLE_TYPES. Note this is the
+# Sample types, mirroring project_amnesty.datasets.shared.schema.SAMPLE_TYPES. Note this is the
 # *shape* contract, not the mixing group: en_solo rows carry sample_type
 # "ko_tts" while their source is "en_solo".
 SAMPLE_TYPE_IDS: dict[str, int] = {"en_kd": 0, "ko_tts": 1, "text_anchor": 2}

@@ -31,7 +31,7 @@ from typing import Iterator
 
 import numpy as np
 
-from ..schema import SAMPLE_RATE
+from project_amnesty.datasets.shared.schema import SAMPLE_RATE
 from ..base import BaseDataset
 from ..mixins import MimiEncoderMixin
 
