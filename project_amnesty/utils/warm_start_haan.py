@@ -1,10 +1,10 @@
-"""Dual-source warm-start for Haan (ARCHITECTURE 1 / 5.4.1 / 5.4.2).
+"""Dual-source warm-start for Haan.
 
 Haan is assembled from two pretrained models, because its two halves come from different places:
 
-    model.* / lm_head / self_attn.{q,k}_norm     <- Qwen3      (ARCHITECTURE 1)
-    embed_tokens.{0..K-1}                        <- Moshi, user half   (ARCHITECTURE 5.4.2)
-    depth_decoder.*                              <- Moshi      (ARCHITECTURE 5.4.1)
+    model.* / lm_head / self_attn.{q,k}_norm     <- Qwen3
+    embed_tokens.{0..K-1}                        <- Moshi, user half
+    depth_decoder.*                              <- Moshi
 
 **Why the Qwen3 side needs surgery and the Moshi side does not.** Haan's backbone is
 `HaanModel(MoshiModel)`, so it is laid out like Moshi even while holding Qwen3's weights. The two
@@ -21,18 +21,12 @@ describe the same transformer with different module shapes:
   - Qwen3's QK-Norm has a home only because `HaanAttention` adds `q_norm`/`k_norm`
     (`config.use_qk_norm`); a stock `MoshiAttention` would drop 2 tensors per layer.
 
-Everything else is a rename or a straight copy. The mapping was verified end to end: a tiny
-`Qwen3Model` and a `HaanModel` built through it produce bit-identical fp32 output.
+Everything else is a rename or a straight copy.
 
-**What starts cold.** `depth_decoder.model.text_embed_tokens` (~155M parameters) has no source at
-all -- Moshi's is sized for its own 32k tokenizer and the rows do not correspond to Qwen3's. That,
-plus the reserved embedding row and the two role embeddings, is ~1.7% of the model (the depth text
-table dominates the figure). Everything unsourced is printed rather than allowed to pass as
-transferred.
-
-Location note: this module lives under `utils/` rather than `models/haan/` so that `models/` never
-imports from `utils/`. It is model *assembly*, not model *definition* -- the classes in
-`models/haan/` stay independent of where their initial weights come from.
+**What starts cold.** `depth_decoder.model.text_embed_tokens` has no source at all -- Moshi's is
+sized for its own 32k tokenizer and the rows do not correspond to Qwen3's. That, plus the reserved
+embedding row and the two role embeddings, is everything not transferred. Everything unsourced is
+printed rather than allowed to pass as transferred.
 """
 
 from __future__ import annotations
@@ -51,14 +45,14 @@ __all__ = [
     "warm_start_qwen3_moshi",
 ]
 
-# ARCHITECTURE 5.4.2. Which half of Moshi's `2 * K` audio tables seeds Haan's `K` shared ones.
+# Which half of Moshi's `2 * K` audio tables seeds Haan's `K` shared ones.
 #
 #   "user"   emb[K:2K] -- the DEFAULT and the documented choice. Moshi's user stream was trained
 #            with the second speaker's voice resampled per example, so this half never collapsed
 #            onto a single actor. Removing fixed-speaker bias is this project's premise, which
-#            makes it the better prior for voice-prompt cloning (5.2).
+#            makes it the better prior for voice-prompt cloning.
 #   "self"   emb[0:K]  -- Moshi's own stream, narrowed to one actor's voice by instruct tuning.
-#            Kept for the 3.6 ablation.
+#            Kept as an ablation.
 #   "random" leave Haan's own init; measures what the warm-start is actually worth.
 #
 # The choice is NOT cosmetic and cannot be left to name matching: Moshi's tables 0..7 carry the
@@ -103,8 +97,8 @@ def haan_config_from_moshi(
 ):
     """Derive a `HaanConfig` describing a MOSHI-backbone Haan.
 
-    Used by the Moshi-only warm-start (the ARCHITECTURE 3.6 baseline arm). Everything dimensional
-    is Moshi's, unchanged -- 5.4.1 reuses audio cardinality 2048 and depth dim 1024 as-is.
+    Used by the Moshi-only warm-start (the baseline arm). Everything dimensional is Moshi's,
+    unchanged -- the audio cardinality (2048) and depth dim (1024) are reused as-is.
 
     `use_qk_norm` defaults to **False** here, and that default is load bearing: `HaanConfig`'s own
     default is True (Haan's normal shape is a Qwen3 backbone) and `MoshiConfig.to_dict()` carries
@@ -129,9 +123,9 @@ def haan_config_from_moshi(
     config_dict["use_qk_norm"] = use_qk_norm
     # `moshi_config.to_dict()` carries Moshi's own `sliding_window=3000`, which would override
     # `HaanConfig`'s deliberate None. Cleared so this arm differs from the Qwen3 arm ONLY in the
-    # backbone -- it exists to isolate the Qwen3 substitution (ARCH 3.6), and a context limit
-    # present in one arm and absent in the other is a confound. Harmless in practice: a 3000-frame
-    # window is bit-identical to full causal below 3000, and this arm is capped at Moshi's
+    # backbone -- it exists to isolate the Qwen3 substitution, and a context limit present in one
+    # arm and absent in the other is a confound. Harmless in practice: a 3000-frame window is
+    # identical to full causal below 3000, and this arm is capped at Moshi's
     # `max_position_embeddings` anyway.
     config_dict["sliding_window"] = None
     config_dict.update(overrides)
@@ -165,7 +159,7 @@ def haan_config_from_qwen3_and_moshi(
       - **`sliding_window`** is cleared to None. Qwen3 is full-attention, and Moshi's inherited
         3000 is not inert: `MoshiModel.forward` selects `create_sliding_window_causal_mask`
         whenever it is non-None, and the cache builds window layers that physically evict KV. It
-        is bit-identical to full causal up to 3000 positions, so it passes every short test and
+        is identical to full causal up to 3000 positions, so it passes every short test and
         diverges only on long context -- which is exactly why it has to be set here rather than
         noticed later. It must also be set BEFORE any cache is constructed.
     """
@@ -178,7 +172,7 @@ def haan_config_from_qwen3_and_moshi(
     rope_theta = (qwen3.get("rope_parameters") or {}).get("rope_theta") or qwen3.get("rope_theta")
 
     config_dict = {
-        # --- backbone: Qwen3 (ARCHITECTURE 1) ---
+        # --- backbone: Qwen3 ---
         "vocab_size": qwen3["vocab_size"],
         "hidden_size": qwen3["hidden_size"],
         "num_hidden_layers": qwen3["num_hidden_layers"],
@@ -200,7 +194,7 @@ def haan_config_from_qwen3_and_moshi(
         "pad_token_id": None,
         "sliding_window": None,
         "use_qk_norm": True,
-        # --- audio stack: Moshi (ARCHITECTURE 4 / 5.4) ---
+        # --- audio stack: Moshi ---
         "audio_vocab_size": moshi["audio_vocab_size"],
         "num_codebooks": moshi["num_codebooks"],
         "audio_encoder_config": moshi.get("audio_encoder_config"),
@@ -238,8 +232,8 @@ def moshi_audio_tables(
 
     Reads only the `embed_tokens.*` tensors via safetensors' lazy `safe_open`, so the backbone is
     never materialized. This is the same quantity the warm-start copies in, which is why
-    `utils/evaluate.py` measures the ARCHITECTURE 5.4.2 / RISKS 3 embedding drift against THIS
-    function rather than re-deriving the initialization independently.
+    `utils/evaluate.py` measures the embedding drift against THIS function rather than re-deriving
+    the initialization independently.
 
     HF-format checkpoints only (`kmhf/hf-moshiko` and friends), where the tables are
     `embed_tokens.<i>.weight`. The original Kyutai release names them `emb.<i>.weight`;
@@ -311,7 +305,7 @@ def _stream_tensors(ckpt: str, *, revision: str | None = None):
     """Yield `(name, tensor)` for every tensor in a checkpoint, one shard at a time.
 
     Streamed rather than loaded through `Qwen3ForCausalLM.from_pretrained` because holding Qwen3,
-    Moshi and Haan resident at once is ~50 GB in bf16. Safe to read raw for Qwen3: unlike Moshi --
+    Moshi and Haan resident at once costs far more memory. Safe to read raw for Qwen3: unlike Moshi --
     whose released checkpoints need transformers' `_checkpoint_conversion_mapping` to reach the
     current module layout -- Qwen3's on-disk keys already match its modules.
     """
@@ -342,8 +336,8 @@ def warm_start_qwen3_moshi(
 ):
     """Assemble a Haan model: Qwen3 backbone + Moshi audio embeddings + Moshi depth decoder.
 
-    ARCHITECTURE 1 + 5.4.1 + 5.4.2 as one operation. See the module docstring for the full mapping
-    and for what starts cold.
+    Combines the backbone, audio-table and depth-decoder transfers into one operation. See the
+    module docstring for the full mapping and for what starts cold.
 
     Args:
         qwen3_ckpt: Qwen3 checkpoint for the Temporal backbone, `lm_head` and QK-Norm.
@@ -403,9 +397,9 @@ def warm_start_from_moshi(
 ):
     """Assemble a Haan model warm-started ENTIRELY from Moshi -- backbone included.
 
-    The ARCHITECTURE 3.6 baseline arm: the same audio/Depth deltas, but Helium rather than Qwen3
-    behind them, so the Korean-emergence comparison has a control. Built with `use_qk_norm=False`,
-    since a Moshi backbone has no QK-Norm to load.
+    The baseline arm: the same audio/Depth deltas, but Helium rather than Qwen3 behind them, so the
+    Korean-emergence comparison has a control. Built with `use_qk_norm=False`, since a Moshi
+    backbone has no QK-Norm to load.
 
     Memory: both models are resident while the tensors are copied (~2x the checkpoint). The Moshi
     side is released before returning. Load in bf16 (`dtype=torch.bfloat16`) to halve it.

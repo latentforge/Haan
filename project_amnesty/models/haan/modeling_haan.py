@@ -62,7 +62,7 @@ def _sequence_width(input_ids: torch.Tensor | None, inputs_embeds: torch.Tensor 
     Both are checked because the depth decoder's layout guard has to hold for an `inputs_embeds`
     caller too: gating on `input_ids` alone let a `2 * K`-wide embedding sequence walk the banned
     sequential path with no error, leaking the assistant's frame-internal choice into the user
-    logits (measured: a perturbation that must move them by 0 moved them by 3353).
+    logits.
     """
     if input_ids is not None:
         return input_ids.shape[1]
@@ -281,10 +281,9 @@ class HaanDepthDecoderModel(MoshiDepthDecoderModel):
         # its body, which drifts on every upstream change. The discarded modules are collected --
         # this is transient peak, not a leak.
         #
-        # The saving is in peak RSS, and it is worth roughly a third of it at the real depth size
-        # (hidden 1024, input 4096, 6 layers, 16 codebooks): ~13.7GB before, ~9GB after. Wall-clock
-        # numbers are deliberately not quoted -- they were measured on a loaded machine and did not
-        # reproduce; construction time here is dominated by weight init, not by the rebuild.
+        # The saving is in peak construction memory: narrowing the axis sizes the input tables,
+        # `input_projections`, and each layer's flexible linears to one stream's width, so the
+        # full-width versions are never allocated in the first place.
         #
         # Narrowed in place, not on a `deepcopy`: a copy would leave every layer holding a *different*
         # config object than the one `forward` passes to `create_causal_mask`, and
@@ -306,13 +305,10 @@ class HaanDepthDecoderModel(MoshiDepthDecoderModel):
 
         self.codebooks_per_role = codebooks_per_role
 
-        # The parent's `num_codebooks - 1` input tables (here `K - 1`) are exactly right, and the
-        # count is not an oversight to correct. Every row is `[text, cb_0 .. cb_{K-2}]`: the last
-        # codebook of a stream is only ever a target, never fed back in. A `K`-th table was briefly
-        # added on the reasoning that "under role sharing every slot is an input for some role" --
-        # true of the sequential layout, false once `_split_roles` made every row one stream wide.
-        # It reached no forward pass, received no gradient, had no warm-start source, and sat at
-        # random init.
+        # The parent's `num_codebooks - 1` input tables (here `K - 1`) are exactly right. Every row is
+        # `[text, cb_0 .. cb_{K-2}]`: the last codebook of a stream is only ever a target, never fed
+        # back in, so under the role-parallel layout (`_split_roles`, one stream per row) there is no
+        # input for a `K`-th slot.
 
         self.post_init()
 
@@ -371,14 +367,12 @@ class HaanDepthDecoderModel(MoshiDepthDecoderModel):
             # both bounds into one reduction; `and` short-circuits so the sync fires only at prefill (which
             # is every training forward, since training has no cache, and once per generated frame).
             #
-            # What the gate gives up, written down so it stays a decision rather than an accident: a
-            # *different* `role_ids` handed in on a warm cache is not range-checked, and `-1` is a legal
-            # index that would alias to the last role silently. Nothing does that here -- the only
-            # producers are the two `torch.arange` sites below, and `generate` builds one tensor per
-            # frame and reuses it for every step of that frame, so checking at the frame's first step
-            # checks the tensor every later step uses. The shape check above stays ungated (it is free).
-            # `tests/models/test_haan_guards.py::test_role_ids_range_is_validated_at_prefill_only` pins
-            # both halves of that bargain; change them together.
+            # What the gate gives up: a *different* `role_ids` handed in on a warm cache is not
+            # range-checked, and `-1` is a legal index that would alias to the last role silently.
+            # Nothing does that here -- the only producers are the two `torch.arange` sites below, and
+            # `generate` builds one tensor per frame and reuses it for every step of that frame, so
+            # checking at the frame's first step checks the tensor every later step uses. The shape
+            # check above stays ungated (it is free).
             if past_seen_tokens == 0 and bool(((role_ids < 0) | (role_ids >= self.config.num_roles)).any()):
                 raise ValueError(
                     f"`role_ids` must lie in [0, {self.config.num_roles}), got "
@@ -398,8 +392,8 @@ class HaanDepthDecoderModel(MoshiDepthDecoderModel):
             # loop control touches no tensor -- where the previous `for position_idx in codebook_idx:
             # position_idx.item()` forced a GPU->CPU sync every step (8 per training forward, one per
             # generated codebook) and a torch.compile graph break each time. Iterating `range` instead
-            # is bit-identical (verified max|Δ|=0 across prefill and every incremental step) and drops
-            # those syncs to zero. `codebook_idx` stays a tensor for `_slot_and_role` / `position_ids`,
+            # is bit-identical and drops those syncs to zero. `codebook_idx` stays a tensor for
+            # `_slot_and_role` / `position_ids`,
             # which index it whole and never sync per element.
             inputs_embeds = []
             for local_idx in range(input_ids.shape[1]):
@@ -692,7 +686,7 @@ class HaanForConditionalGeneration(HaanGenerationMixin, MoshiForConditionalGener
     # list; replacing it would make the depth layers splittable again.
     #
     # Only accelerate reads this (`from_pretrained(device_map=...)`); the FSDP2 path in
-    # `utils/train.py` matches by attribute path instead, which is why the gap went unnoticed.
+    # `utils/train.py` matches by attribute path instead.
     _no_split_modules = ["HaanDecoderLayer"]
 
     def __init__(self, config: HaanConfig):
@@ -709,9 +703,8 @@ class HaanForConditionalGeneration(HaanGenerationMixin, MoshiForConditionalGener
 
         # `MoshiForConditionalGeneration.__init__` hardcodes `self.model = MoshiModel(config)`, so the
         # backbone has to be replaced here too -- subclassing `MoshiModel` is not enough to get it used.
-        # This was invisible while `HaanModel` was parameter-identical to its parent; it stops being
-        # invisible now that `HaanDecoderLayer` carries QK-Norm, which would otherwise
-        # be silently absent from every layer while `config.use_qk_norm` reported True.
+        # With `HaanDecoderLayer` carrying QK-Norm, leaving the parent's `MoshiModel` in place would
+        # leave the norm silently absent from every layer while `config.use_qk_norm` reported True.
         self.model = HaanModel(config)
 
         self.post_init()

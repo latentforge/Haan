@@ -7,7 +7,7 @@ from .modeling_haan import (
     HaanModel,
     RoleEmbedding,
 )
-from .processing_haan import HaanProcessor
+from .processing_haan import HaanProcessor, HaanTokenizer
 
 __all__ = [
     "HaanConfig",
@@ -19,4 +19,5 @@ __all__ = [
     "HaanGenerationMixin",
     "HaanForConditionalGeneration",
     "HaanProcessor",
+    "HaanTokenizer",
 ]
